@@ -1,42 +1,50 @@
 export type SignalType =
-  | 'signal_offer'
-  | 'signal_answer'
-  | 'signal_ice_candidate'
-  | 'peer_connect'
-  | 'peer_disconnect'
-  | 'peer_ready'
-  | 'peer_disconnected';
+  | 'offer'
+  | 'answer'
+  | 'ice-candidate'
+  | 'join'
+  | 'leave'
+  | 'peer-joined'
+  | 'peer-left'
+  | 'ready'
+  | 'error';
 
 export interface WebSocketMessage<T = any> {
   type: SignalType;
+  from?: string;
+  to?: string;
+  meeting_id?: string;
   data: T;
 }
 
 export interface SignalOfferMessage extends WebSocketMessage {
-  type: 'signal_offer';
+  type: 'offer';
   data: {
-    offer: RTCSessionDescriptionInit;
-    from_peer_id: string;
-    to_peer_id: string;
+    sdp: string;
+    type: 'offer';
   };
 }
 
 export interface SignalAnswerMessage extends WebSocketMessage {
-  type: 'signal_answer';
+  type: 'answer';
   data: {
-    answer: RTCSessionDescriptionInit;
-    from_peer_id: string;
-    to_peer_id: string;
+    sdp: string;
+    type: 'answer';
   };
 }
 
 export interface SignalICECandidateMessage extends WebSocketMessage {
-  type: 'signal_ice_candidate';
+  type: 'ice-candidate';
   data: {
-    candidate: RTCIceCandidateInit;
-    from_peer_id: string;
-    to_peer_id: string;
+    candidate: string;
+    sdpMid: string;
+    sdpMLineIndex: number;
   };
+}
+
+export interface PeerInfo {
+  user_id: string;
+  username: string;
 }
 
 export interface PeerConnectionConfig {
