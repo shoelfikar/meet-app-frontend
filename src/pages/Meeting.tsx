@@ -16,9 +16,12 @@ import {
 } from '@heroicons/react/24/outline';
 import type { Meeting as MeetingType, MeetingParticipant, ChatMessage, SSEEvent } from '../types';
 import { apiService } from '../services';
+import { webSocketService } from '../services/websocket';
+import { webRTCService } from '../services/webrtc';
 import { Modal } from '../components/Common/Modal';
 import { useSSE } from '../hooks/useSSE';
 import type { AxiosError } from 'axios';
+import type { WebSocketMessage } from '../types/webrtc';
 
 export const Meeting = () => {
   const { meetingCode } = useParams<{ meetingCode: string }>();
@@ -30,6 +33,8 @@ export const Meeting = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
   // Meeting state
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
@@ -115,6 +120,209 @@ export const Meeting = () => {
     onOpen: () => console.log('SSE connected'),
     onError: (error) => console.error('SSE error:', error),
   });
+
+  // WebRTC: Create peer connection
+  const createPeerConnection = useCallback(async (peerId: string) => {
+    if (peerConnectionsRef.current.has(peerId)) {
+      return peerConnectionsRef.current.get(peerId)!;
+    }
+
+    const peerConnection = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+
+    // Add local stream tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        peerConnection.addTrack(track, localStreamRef.current!);
+      });
+    }
+
+    // Handle ICE candidates
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        webSocketService.send({
+          type: 'ice-candidate',
+          to: peerId,
+          data: {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid || '',
+            sdpMLineIndex: event.candidate.sdpMLineIndex || 0,
+          },
+        });
+      }
+    };
+
+    // Handle remote stream
+    peerConnection.ontrack = (event) => {
+      console.log('Received remote track from', peerId);
+      const remoteVideo = remoteVideoRefs.current.get(peerId);
+      if (remoteVideo && event.streams[0]) {
+        remoteVideo.srcObject = event.streams[0];
+      }
+
+      // Update participant with stream
+      setParticipants((prev) =>
+        prev.map((p) =>
+          p.user.id === peerId ? { ...p, stream: event.streams[0] } : p
+        )
+      );
+    };
+
+    // Handle connection state changes
+    peerConnection.onconnectionstatechange = () => {
+      console.log(`Peer ${peerId} connection state:`, peerConnection.connectionState);
+      if (peerConnection.connectionState === 'failed') {
+        peerConnection.close();
+        peerConnectionsRef.current.delete(peerId);
+      }
+    };
+
+    peerConnectionsRef.current.set(peerId, peerConnection);
+    return peerConnection;
+  }, []);
+
+  // WebRTC: Handle WebSocket messages
+  const handleWebSocketMessage = useCallback(async (message: WebSocketMessage) => {
+    console.log('WebSocket message:', message);
+
+    switch (message.type) {
+      case 'peer-joined': {
+        // New peer joined, create offer
+        const peerId = message.from!;
+        console.log('Peer joined, creating offer for:', peerId);
+
+        const peerConnection = await createPeerConnection(peerId);
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        webSocketService.send({
+          type: 'offer',
+          to: peerId,
+          data: {
+            sdp: offer.sdp!,
+            type: 'offer',
+          },
+        });
+        break;
+      }
+
+      case 'offer': {
+        // Received offer, create answer
+        const peerId = message.from!;
+        console.log('Received offer from:', peerId);
+
+        const peerConnection = await createPeerConnection(peerId);
+        await peerConnection.setRemoteDescription(
+          new RTCSessionDescription({
+            sdp: message.data.sdp,
+            type: 'offer',
+          })
+        );
+
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+
+        webSocketService.send({
+          type: 'answer',
+          to: peerId,
+          data: {
+            sdp: answer.sdp!,
+            type: 'answer',
+          },
+        });
+        break;
+      }
+
+      case 'answer': {
+        // Received answer
+        const peerId = message.from!;
+        console.log('Received answer from:', peerId);
+
+        const peerConnection = peerConnectionsRef.current.get(peerId);
+        if (peerConnection) {
+          await peerConnection.setRemoteDescription(
+            new RTCSessionDescription({
+              sdp: message.data.sdp,
+              type: 'answer',
+            })
+          );
+        }
+        break;
+      }
+
+      case 'ice-candidate': {
+        // Received ICE candidate
+        const peerId = message.from!;
+        console.log('Received ICE candidate from:', peerId);
+
+        const peerConnection = peerConnectionsRef.current.get(peerId);
+        if (peerConnection) {
+          await peerConnection.addIceCandidate(
+            new RTCIceCandidate({
+              candidate: message.data.candidate,
+              sdpMid: message.data.sdpMid,
+              sdpMLineIndex: message.data.sdpMLineIndex,
+            })
+          );
+        }
+        break;
+      }
+
+      case 'peer-left': {
+        // Peer left, cleanup connection
+        const peerId = message.from!;
+        console.log('Peer left:', peerId);
+
+        const peerConnection = peerConnectionsRef.current.get(peerId);
+        if (peerConnection) {
+          peerConnection.close();
+          peerConnectionsRef.current.delete(peerId);
+        }
+        remoteVideoRefs.current.delete(peerId);
+        break;
+      }
+    }
+  }, [createPeerConnection]);
+
+  // WebSocket: Connect and setup listeners
+  useEffect(() => {
+    if (!meeting?.id) return;
+
+    const connectWebSocket = async () => {
+      try {
+        await webSocketService.connect(meeting.id);
+        console.log('WebSocket connected for meeting:', meeting.id);
+
+        // Setup message handlers
+        webSocketService.on('peer-joined', handleWebSocketMessage);
+        webSocketService.on('offer', handleWebSocketMessage);
+        webSocketService.on('answer', handleWebSocketMessage);
+        webSocketService.on('ice-candidate', handleWebSocketMessage);
+        webSocketService.on('peer-left', handleWebSocketMessage);
+      } catch (error) {
+        console.error('Failed to connect WebSocket:', error);
+      }
+    };
+
+    connectWebSocket();
+
+    return () => {
+      // Cleanup WebSocket listeners
+      webSocketService.off('peer-joined', handleWebSocketMessage);
+      webSocketService.off('offer', handleWebSocketMessage);
+      webSocketService.off('answer', handleWebSocketMessage);
+      webSocketService.off('ice-candidate', handleWebSocketMessage);
+      webSocketService.off('peer-left', handleWebSocketMessage);
+
+      // Close all peer connections
+      peerConnectionsRef.current.forEach((pc) => pc.close());
+      peerConnectionsRef.current.clear();
+
+      // Disconnect WebSocket
+      webSocketService.disconnect();
+    };
+  }, [meeting?.id, handleWebSocketMessage]);
 
   // Initialize media devices
   const initializeMedia = async () => {
@@ -616,18 +824,27 @@ export const Meeting = () => {
                 key={participant.id}
                 className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
               >
-                {!participant.is_video_on ? (
+                {/* Remote video element */}
+                {participant.stream ? (
+                  <video
+                    ref={(el) => {
+                      if (el) {
+                        remoteVideoRefs.current.set(participant.user.id, el);
+                        if (participant.stream) {
+                          el.srcObject = participant.stream;
+                        }
+                      }
+                    }}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
                   <div className="flex flex-col items-center justify-center">
                     <div className="w-20 h-20 bg-gray-700 rounded-full flex items-center justify-center mb-2">
                       <UserIcon className="w-12 h-12 text-gray-500" />
                     </div>
                     <span className="text-white text-sm">{participant.user.name}</span>
-                  </div>
-                ) : (
-                  <div className="w-full h-full bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center">
-                    <div className="w-24 h-24 bg-gray-600 rounded-full flex items-center justify-center">
-                      <UserIcon className="w-16 h-16 text-gray-400" />
-                    </div>
                   </div>
                 )}
 
