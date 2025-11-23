@@ -17,7 +17,7 @@ export const useMeeting = () => {
   } = useMeetingStore();
 
   const {
-    participants,
+    // participants,
     addParticipant,
     removeParticipant,
     updateParticipant,

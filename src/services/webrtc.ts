@@ -77,7 +77,7 @@ export class WebRTCService {
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         webSocketService.send({
-          type: 'signal_ice_candidate',
+          type: 'ice-candidate',
           data: {
             candidate: event.candidate.toJSON(),
             from_peer_id: this.getLocalPeerId(),
