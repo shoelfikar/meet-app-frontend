@@ -1,7 +1,7 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig, AxiosError } from 'axios';
 import type { AuthResponse, LoginCredentials, RegisterData } from '../types';
 
-const API_URL = import.meta.env.VITE_API_URL || `https://${location.hostname}`;
+const API_URL = import.meta.env.VITE_API_URL || `http://${location.host}`;
 
 class ApiService {
   private client: AxiosInstance;
@@ -100,12 +100,15 @@ class ApiService {
 
   // Chat endpoints
   async sendChatMessage(meetingId: string, message: string) {
-    const { data } = await this.client.post(`/meetings/${meetingId}/chat`, { message });
+    const { data } = await this.client.post(`/meetings/${meetingId}/messages`, {
+      content: message,
+      type: 'text'
+    });
     return data;
   }
 
   async getChatHistory(meetingId: string) {
-    const { data } = await this.client.get(`/meetings/${meetingId}/chat/history`);
+    const { data } = await this.client.get(`/meetings/${meetingId}/messages`);
     return data;
   }
 

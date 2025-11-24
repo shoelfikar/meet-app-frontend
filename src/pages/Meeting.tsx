@@ -12,13 +12,15 @@ import {
   MicrophoneIcon as MicOffIcon,
   VideoCameraSlashIcon,
   XMarkIcon,
-  PaperAirplaneIcon,
 } from '@heroicons/react/24/outline';
 import type { Meeting as MeetingType, MeetingParticipant, ChatMessage, SSEEvent } from '../types';
+import type { MessageResponse } from '../types/message';
+import { transformMessageResponse } from '../types/message';
 import { apiService } from '../services';
 import { webSocketService } from '../services/websocket';
 // import { webRTCService } from '../services/webrtc';
 import { Modal } from '../components/Common/Modal';
+import { ChatPanel } from '../components/Chat/ChatPanel';
 import { useSSE } from '../hooks/useSSE';
 import type { AxiosError } from 'axios';
 import type { WebSocketMessage } from '../types/webrtc';
@@ -107,7 +109,10 @@ export const Meeting = () => {
         break;
 
       case 'chat_message': {
-        const chatMessage = event.data as ChatMessage;
+        // Backend sends MessageResponse, transform to ChatMessage
+        const messageResponse = event.data as MessageResponse;
+        const chatMessage = transformMessageResponse(messageResponse);
+        console.log('[Chat] Received message via SSE:', chatMessage);
         setMessages((prev) => [...prev, chatMessage]);
         break;
       }
@@ -619,6 +624,20 @@ export const Meeting = () => {
         const participantList = await apiService.getParticipants(meetingData.id);
         setParticipants(participantList);
 
+        // Load chat history
+        try {
+          const chatHistory = await apiService.getChatHistory(meetingData.id);
+          // Transform backend MessageResponse[] to ChatMessage[]
+          const transformedMessages = chatHistory.map((msg: MessageResponse) =>
+            transformMessageResponse(msg)
+          );
+          setMessages(transformedMessages);
+          console.log('[Chat] Loaded', transformedMessages.length, 'messages from history');
+        } catch (chatErr) {
+          console.error('[Chat] Failed to load chat history:', chatErr);
+          // Don't fail the whole meeting join if chat history fails
+        }
+
       } catch (err) {
         console.error('Failed to initialize meeting:', err);
         const axiosError = err as AxiosError<{ error?: string }>;
@@ -678,18 +697,20 @@ export const Meeting = () => {
     setShowLeaveModal(false);
   };
 
-  const handleSendMessage = () => {
-    if (inputMessage.trim()) {
-      const newMessage: ChatMessage = {
-        id: String(messages.length + 1),
-        meeting_id: meeting?.id || '',
-        sender_id: 'current-user',
-        sender_name: 'You',
-        message: inputMessage,
-        created_at: new Date().toISOString(),
-      };
-      setMessages([...messages, newMessage]);
+  const handleSendMessage = async () => {
+    if (!inputMessage.trim() || !meeting?.id) return;
+
+    try {
+      // Send message to backend - will be broadcast via SSE to all participants
+      await apiService.sendChatMessage(meeting.id, inputMessage);
+
+      // Clear input after successful send
       setInputMessage('');
+
+      console.log('[Chat] Message sent successfully');
+    } catch (error) {
+      console.error('[Chat] Failed to send message:', error);
+      // TODO: Show error notification to user
     }
   };
 
@@ -698,11 +719,6 @@ export const Meeting = () => {
       e.preventDefault();
       handleSendMessage();
     }
-  };
-
-  const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   };
 
   const getGridClass = (count: number) => {
@@ -944,81 +960,16 @@ export const Meeting = () => {
           </div>
         </div>
 
-        {/* Chat panel - Overlay on mobile, Sidebar on desktop */}
-        {isChatOpen && (
-          <>
-            {/* Backdrop for mobile */}
-            <div
-              className="fixed inset-0 bg-black/50 z-40 md:hidden"
-              onClick={() => setIsChatOpen(false)}
-            />
-
-            {/* Chat panel */}
-            <div className={`
-              flex flex-col h-full bg-gray-800 border-gray-700
-              fixed md:relative inset-y-0 right-0 z-50
-              w-full sm:w-96 md:w-80 lg:w-96
-              transform transition-transform duration-300 ease-in-out
-              md:transform-none md:border-l
-              ${isChatOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
-            `}>
-              {/* Header */}
-              <div className="flex items-center justify-between p-3 sm:p-4 border-b border-gray-700">
-                <h3 className="text-white font-semibold text-base sm:text-lg">Chat</h3>
-                <button
-                  onClick={() => setIsChatOpen(false)}
-                  className="text-gray-400 hover:text-white active:text-white transition-colors touch-manipulation p-1"
-                >
-                  <XMarkIcon className="w-5 h-5 sm:w-6 sm:h-6" />
-                </button>
-              </div>
-
-              {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2 sm:space-y-3">
-                {messages.length === 0 ? (
-                  <div className="flex items-center justify-center h-full">
-                    <p className="text-gray-400 text-sm">No messages yet</p>
-                  </div>
-                ) : (
-                  messages.map((message) => (
-                    <div key={message.id} className="space-y-0.5 sm:space-y-1">
-                      <div className="flex items-baseline space-x-2">
-                        <span className="text-blue-400 text-xs sm:text-sm font-medium">
-                          {message.sender_name}
-                        </span>
-                        <span className="text-gray-500 text-xs">
-                          {formatTime(message.created_at)}
-                        </span>
-                      </div>
-                      <p className="text-white text-xs sm:text-sm break-words">{message.message}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              {/* Input */}
-              <div className="p-3 sm:p-4 border-t border-gray-700 safe-area-inset-bottom">
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="text"
-                    value={inputMessage}
-                    onChange={(e) => setInputMessage(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type a message..."
-                    className="flex-1 bg-gray-700 text-white rounded-lg px-3 sm:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <button
-                    onClick={handleSendMessage}
-                    disabled={!inputMessage.trim()}
-                    className="p-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition-colors touch-manipulation"
-                  >
-                    <PaperAirplaneIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+        {/* Chat panel */}
+        <ChatPanel
+          isOpen={isChatOpen}
+          onClose={() => setIsChatOpen(false)}
+          messages={messages}
+          inputMessage={inputMessage}
+          onInputChange={setInputMessage}
+          onSendMessage={handleSendMessage}
+          onKeyDown={handleKeyDown}
+        />
       </div>
 
       {/* Controls */}
