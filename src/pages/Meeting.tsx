@@ -1,17 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  MicrophoneIcon,
-  VideoCameraIcon,
-  PhoneIcon,
-  ChatBubbleLeftIcon,
-  ComputerDesktopIcon,
   UserIcon,
 } from '@heroicons/react/24/solid';
 import {
   MicrophoneIcon as MicOffIcon,
   VideoCameraSlashIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
 import type { Meeting as MeetingType, MeetingParticipant, ChatMessage, SSEEvent } from '../types';
 import type { MessageResponse } from '../types/message';
@@ -20,7 +14,10 @@ import { apiService } from '../services';
 import { webSocketService } from '../services/websocket';
 // import { webRTCService } from '../services/webrtc';
 import { Modal } from '../components/Common/Modal';
+import { Header } from '../components/Common/Header';
 import { ChatPanel } from '../components/Chat/ChatPanel';
+import { ErrorMessage } from '../components/Error/ErrorMessage';
+import { MediaControls } from '../components/Controls/MediaControls';
 import { useSSE } from '../hooks/useSSE';
 import type { AxiosError } from 'axios';
 import type { WebSocketMessage } from '../types/webrtc';
@@ -749,37 +746,26 @@ export const Meeting = () => {
   // Error state
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="bg-red-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-            <XMarkIcon className="w-10 h-10 text-white" />
-          </div>
-          <p className="text-white text-lg mb-4">{error}</p>
-          <button
-            onClick={() => navigate('/')}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-          >
-            Back to Home
-          </button>
-        </div>
-      </div>
+      <ErrorMessage
+        type="error"
+        title="Failed to Join Meeting"
+        message={error}
+        buttonText="Back to Home"
+        onButtonClick={() => navigate('/')}
+      />
     );
   }
 
   // No meeting found
   if (!meeting) {
     return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-white text-lg mb-4">Meeting not found</p>
-          <button
-            onClick={() => navigate('/')}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-          >
-            Back to Home
-          </button>
-        </div>
-      </div>
+      <ErrorMessage
+        type="not-found"
+        title="Meeting Not Found"
+        message="The meeting you're looking for doesn't exist or has ended."
+        buttonText="Back to Home"
+        onButtonClick={() => navigate('/')}
+      />
     );
   }
 
@@ -808,26 +794,12 @@ export const Meeting = () => {
   return (
     <div className="h-screen flex flex-col bg-gray-900">
       {/* Header */}
-      <div className="bg-gray-800 border-b border-gray-700 px-2 py-1.5 sm:px-4 sm:py-2">
-        <div className="flex items-center justify-between">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-white font-semibold text-sm sm:text-base truncate">{meeting.title}</h2>
-            <p className="text-gray-400 text-xs hidden sm:block">Code: {meeting.code}</p>
-          </div>
-          <div className="flex items-center space-x-2 sm:space-x-3 flex-shrink-0">
-            <span className="text-gray-400 text-xs hidden md:inline">
-              {totalParticipants} participant{totalParticipants !== 1 ? 's' : ''}
-            </span>
-            <span className="text-gray-400 text-xs md:hidden">
-              {totalParticipants}
-            </span>
-            <span className="flex items-center text-green-500 text-xs">
-              <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 sm:mr-1.5 animate-pulse"></span>
-              <span className="hidden sm:inline">{meeting.status === 'active' ? 'Live' : meeting.status}</span>
-            </span>
-          </div>
-        </div>
-      </div>
+      <Header
+        title={meeting.title}
+        code={meeting.code}
+        totalParticipants={totalParticipants}
+        status={meeting.status}
+      />
 
       {/* Media error banner */}
       {mediaError && (
@@ -973,89 +945,19 @@ export const Meeting = () => {
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-center space-x-2 sm:space-x-3 px-2 sm:px-4 py-2 sm:py-2.5 bg-gray-800 border-t border-gray-700">
-        {/* Audio toggle */}
-        <button
-          onClick={toggleAudio}
-          className={`relative p-2 sm:p-2.5 md:p-3 rounded-full transition-colors cursor-pointer touch-manipulation ${
-            isAudioEnabled
-              ? 'bg-gray-700 hover:bg-gray-600 active:bg-gray-600'
-              : 'bg-red-600 hover:bg-red-700 active:bg-red-700 text-white'
-          }`}
-          title={isAudioEnabled ? 'Mute' : 'Unmute'}
-        >
-          {isAudioEnabled ? (
-            <div className="relative w-4 h-4 sm:w-5 sm:h-5">
-              {/* Base icon (gray) */}
-              <MicrophoneIcon className="w-4 h-4 sm:w-5 sm:h-5 text-gray-400" />
-              {/* Filled icon (green) - clips from bottom based on audio level */}
-              <div
-                className="absolute inset-0 overflow-hidden transition-all duration-75"
-                style={{
-                  clipPath: `inset(${100 - audioLevel * 100}% 0 0 0)`,
-                }}
-              >
-                <MicrophoneIcon className="w-4 h-4 sm:w-5 sm:h-5 text-green-500" />
-              </div>
-            </div>
-          ) : (
-            <MicOffIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-          )}
-        </button>
-
-        {/* Video toggle */}
-        <button
-          onClick={toggleVideo}
-          className={`p-2 sm:p-2.5 md:p-3 rounded-full transition-colors cursor-pointer touch-manipulation ${
-            isVideoEnabled
-              ? 'bg-gray-700 hover:bg-gray-600 active:bg-gray-600 text-white'
-              : 'bg-red-600 hover:bg-red-700 active:bg-red-700 text-white'
-          }`}
-          title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
-        >
-          {isVideoEnabled ? (
-            <VideoCameraIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-          ) : (
-            <VideoCameraSlashIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-          )}
-        </button>
-
-        {/* Screen share toggle */}
-        <button
-          onClick={() => setIsScreenSharing(!isScreenSharing)}
-          className={`p-2 sm:p-2.5 md:p-3 rounded-full transition-colors cursor-pointer touch-manipulation hidden sm:flex ${
-            isScreenSharing
-              ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-700 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 active:bg-gray-600 text-white'
-          }`}
-          title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
-        >
-          <ComputerDesktopIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-        </button>
-
-        {/* Chat toggle */}
-        <button
-          onClick={() => setIsChatOpen(!isChatOpen)}
-          className="relative p-2 sm:p-2.5 md:p-3 rounded-full bg-gray-700 hover:bg-gray-600 active:bg-gray-600 text-white transition-colors cursor-pointer touch-manipulation"
-          title="Toggle chat"
-        >
-          <ChatBubbleLeftIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-          {!isChatOpen && messages.length > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 sm:-top-1 sm:-right-1 bg-red-600 text-white text-xs font-bold rounded-full w-4 h-4 flex items-center justify-center">
-              {messages.length > 9 ? '9+' : messages.length}
-            </span>
-          )}
-        </button>
-
-        {/* Leave button */}
-        <button
-          onClick={handleLeaveClick}
-          className="p-2 sm:p-2.5 md:p-3 rounded-full bg-red-600 hover:bg-red-700 active:bg-red-700 text-white transition-colors cursor-pointer touch-manipulation ml-2 sm:ml-3"
-          title="Leave meeting"
-        >
-          <PhoneIcon className="w-4 h-4 sm:w-5 sm:h-5 transform rotate-135" />
-        </button>
-      </div>
+      <MediaControls
+        isAudioEnabled={isAudioEnabled}
+        audioLevel={audioLevel}
+        onToggleAudio={toggleAudio}
+        isVideoEnabled={isVideoEnabled}
+        onToggleVideo={toggleVideo}
+        isScreenSharing={isScreenSharing}
+        onToggleScreenShare={() => setIsScreenSharing(!isScreenSharing)}
+        isChatOpen={isChatOpen}
+        messageCount={messages.length}
+        onToggleChat={() => setIsChatOpen(!isChatOpen)}
+        onLeave={handleLeaveClick}
+      />
 
       {/* Leave Meeting Modal */}
       <Modal
