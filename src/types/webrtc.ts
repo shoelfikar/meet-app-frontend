@@ -7,6 +7,7 @@ export type SignalType =
   | 'peer-joined'
   | 'peer-left'
   | 'ready'
+  | 'media-state-changed'
   | 'error';
 
 export interface WebSocketMessage<T = any> {

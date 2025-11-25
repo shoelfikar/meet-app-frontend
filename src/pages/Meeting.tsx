@@ -48,6 +48,7 @@ export const Meeting = () => {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [isMediaReady, setIsMediaReady] = useState(false);
 
   // UI state
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -57,22 +58,16 @@ export const Meeting = () => {
 
   // SSE event handler for real-time updates
   const handleSSEMessage = useCallback((event: SSEEvent) => {
-    console.log('SSE Event received:', event);
-
     switch (event.type) {
       case 'participant_joined': {
         const newParticipant = event.data as MeetingParticipant;
-        console.log('Participant joined:', newParticipant);
 
         setParticipants((prev) => {
           // Check if participant already exists (avoid duplicates)
           const exists = prev.some(
             (p) => p.user.id === newParticipant.user.id
           );
-          if (exists) {
-            console.log('Participant already exists, skipping');
-            return prev;
-          }
+          if (exists) return prev;
           return [...prev, newParticipant];
         });
         break;
@@ -80,7 +75,6 @@ export const Meeting = () => {
 
       case 'participant_left': {
         const { user_id } = event.data as { user_id: string };
-        console.log('Participant left:', user_id);
 
         setParticipants((prev) =>
           prev.filter((p) => p.user.id !== user_id)
@@ -90,7 +84,6 @@ export const Meeting = () => {
 
       case 'participant_updated': {
         const updatedParticipant = event.data as MeetingParticipant;
-        console.log('Participant updated:', updatedParticipant);
 
         setParticipants((prev) =>
           prev.map((p) =>
@@ -101,7 +94,6 @@ export const Meeting = () => {
       }
 
       case 'meeting_ended':
-        console.log('Meeting ended');
         navigate('/');
         break;
 
@@ -109,7 +101,6 @@ export const Meeting = () => {
         // Backend sends MessageResponse, transform to ChatMessage
         const messageResponse = event.data as MessageResponse;
         const chatMessage = transformMessageResponse(messageResponse);
-        console.log('[Chat] Received message via SSE:', chatMessage);
         setMessages((prev) => [...prev, chatMessage]);
         break;
       }
@@ -119,7 +110,6 @@ export const Meeting = () => {
   // Connect to SSE for real-time updates
   useSSE(meeting?.id || null, {
     onMessage: handleSSEMessage,
-    onOpen: () => console.log('SSE connected'),
     onError: (error) => console.error('SSE error:', error),
   });
 
@@ -127,11 +117,9 @@ export const Meeting = () => {
   const createPeerConnection = useCallback(async (peerId: string) => {
     // Check if peer connection already exists
     if (peerConnectionsRef.current.has(peerId)) {
-      console.log('[WebRTC] Peer connection already exists for:', peerId);
       return peerConnectionsRef.current.get(peerId)!;
     }
 
-    console.log('[WebRTC] Creating new peer connection for:', peerId);
     const peerConnection = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
@@ -139,19 +127,14 @@ export const Meeting = () => {
     // Add local stream tracks
     if (localStreamRef.current) {
       const tracks = localStreamRef.current.getTracks();
-      console.log('[WebRTC] Adding local tracks to peer connection:', tracks.length, 'tracks');
       tracks.forEach((track) => {
-        console.log('[WebRTC] Adding track:', track.kind, track.id);
         peerConnection.addTrack(track, localStreamRef.current!);
       });
-    } else {
-      console.warn('[WebRTC] No local stream available to add tracks');
     }
 
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('[WebRTC] Sending ICE candidate to:', peerId, event.candidate.candidate);
         webSocketService.send({
           type: 'ice-candidate',
           to: peerId,
@@ -161,20 +144,14 @@ export const Meeting = () => {
             sdpMLineIndex: event.candidate.sdpMLineIndex || 0,
           },
         });
-      } else {
-        console.log('[WebRTC] All ICE candidates sent for:', peerId);
       }
     };
 
     // Handle remote stream
     peerConnection.ontrack = (event) => {
-      console.log('[WebRTC] 🎥 Received remote track from:', peerId, 'Track:', event.track.kind, 'Streams:', event.streams.length);
       const remoteVideo = remoteVideoRefs.current.get(peerId);
       if (remoteVideo && event.streams[0]) {
-        console.log('[WebRTC] Setting remote stream to video element for:', peerId);
         remoteVideo.srcObject = event.streams[0];
-      } else {
-        console.warn('[WebRTC] Remote video element not found or no streams for:', peerId);
       }
 
       // Update participant with stream
@@ -187,35 +164,23 @@ export const Meeting = () => {
 
     // Handle connection state changes
     peerConnection.onconnectionstatechange = () => {
-      console.log(`[WebRTC] Peer ${peerId} connection state:`, peerConnection.connectionState);
       if (peerConnection.connectionState === 'failed') {
         console.error('[WebRTC] Connection failed for:', peerId);
         peerConnection.close();
         peerConnectionsRef.current.delete(peerId);
-      } else if (peerConnection.connectionState === 'connected') {
-        console.log('[WebRTC] ✅ Connection established with:', peerId);
       }
     };
 
-    // Handle ICE connection state changes
-    peerConnection.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC] Peer ${peerId} ICE connection state:`, peerConnection.iceConnectionState);
-    };
-
     peerConnectionsRef.current.set(peerId, peerConnection);
-    console.log('[WebRTC] Peer connection created and stored for:', peerId);
     return peerConnection;
   }, []);
 
   // WebRTC: Handle WebSocket messages
   const handleWebSocketMessage = useCallback(async (message: WebSocketMessage) => {
-    console.log('[WebRTC] Received WebSocket message:', message.type, message);
 
     switch (message.type) {
       case 'ready': {
         // Received list of existing peers when we join
-        const peers = message.data as Array<{ user_id: string; username: string }>;
-        console.log('[WebRTC] Ready - existing peers in meeting:', peers.length, peers);
         // Don't create offers, existing peers will send offers to us
         break;
       }
@@ -224,14 +189,12 @@ export const Meeting = () => {
         // New peer joined, we (existing peer) should create offer
         const peerData = message.data as { user_id: string; username: string };
         const peerId = peerData.user_id;
-        console.log('[WebRTC] New peer joined:', peerData.username, '(', peerId, ') - Creating offer');
 
         try {
           const peerConnection = await createPeerConnection(peerId);
           const offer = await peerConnection.createOffer();
           await peerConnection.setLocalDescription(offer);
 
-          console.log('[WebRTC] Sending offer to:', peerId);
           webSocketService.send({
             type: 'offer',
             to: peerId,
@@ -249,12 +212,9 @@ export const Meeting = () => {
       case 'offer': {
         // Received offer from existing peer, create answer
         const peerId = message.from!;
-        console.log('[WebRTC] Received offer from:', peerId);
 
         try {
           const peerConnection = await createPeerConnection(peerId);
-
-          console.log('[WebRTC] Setting remote description (offer)');
           await peerConnection.setRemoteDescription(
             new RTCSessionDescription({
               sdp: message.data.sdp,
@@ -262,11 +222,9 @@ export const Meeting = () => {
             })
           );
 
-          console.log('[WebRTC] Creating answer');
           const answer = await peerConnection.createAnswer();
           await peerConnection.setLocalDescription(answer);
 
-          console.log('[WebRTC] Sending answer to:', peerId);
           webSocketService.send({
             type: 'answer',
             to: peerId,
@@ -284,19 +242,16 @@ export const Meeting = () => {
       case 'answer': {
         // Received answer to our offer
         const peerId = message.from!;
-        console.log('[WebRTC] Received answer from:', peerId);
 
         try {
           const peerConnection = peerConnectionsRef.current.get(peerId);
           if (peerConnection) {
-            console.log('[WebRTC] Setting remote description (answer)');
             await peerConnection.setRemoteDescription(
               new RTCSessionDescription({
                 sdp: message.data.sdp,
                 type: 'answer',
               })
             );
-            console.log('[WebRTC] Remote description set, connection should be established');
           } else {
             console.error('[WebRTC] No peer connection found for:', peerId);
           }
@@ -346,29 +301,53 @@ export const Meeting = () => {
         break;
       }
 
+      case 'media-state-changed': {
+        // Peer changed media state (mute/unmute, video on/off)
+        const peerId = message.from!;
+        const mediaState = message.data as { is_muted: boolean; is_video_on: boolean };
+
+        setParticipants((prev) =>
+          prev.map((p) =>
+            p.user.id === peerId
+              ? { ...p, is_muted: mediaState.is_muted, is_video_on: mediaState.is_video_on }
+              : p
+          )
+        );
+        break;
+      }
+
       default:
         console.warn('[WebRTC] Unknown message type:', message.type);
     }
   }, [createPeerConnection]);
 
-  // WebSocket: Connect and setup listeners
+  // WebSocket: Connect and setup listeners (only after media is ready)
   useEffect(() => {
-    if (!meeting?.id) return;
+    if (!meeting?.id || !isMediaReady) return;
+
+    // Create wrapper handlers
+    const readyHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const peerJoinedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const offerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const answerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const iceCandidateHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const peerLeftHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const mediaStateChangedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
 
     const connectWebSocket = async () => {
       try {
         await webSocketService.connect(meeting.id);
-        console.log('WebSocket connected for meeting:', meeting.id);
 
         // Setup message handlers
-        webSocketService.on('ready', handleWebSocketMessage);
-        webSocketService.on('peer-joined', handleWebSocketMessage);
-        webSocketService.on('offer', handleWebSocketMessage);
-        webSocketService.on('answer', handleWebSocketMessage);
-        webSocketService.on('ice-candidate', handleWebSocketMessage);
-        webSocketService.on('peer-left', handleWebSocketMessage);
+        webSocketService.on('ready', readyHandler);
+        webSocketService.on('peer-joined', peerJoinedHandler);
+        webSocketService.on('offer', offerHandler);
+        webSocketService.on('answer', answerHandler);
+        webSocketService.on('ice-candidate', iceCandidateHandler);
+        webSocketService.on('peer-left', peerLeftHandler);
+        webSocketService.on('media-state-changed', mediaStateChangedHandler);
       } catch (error) {
-        console.error('Failed to connect WebSocket:', error);
+        console.error('[WebSocket] Failed to connect:', error);
       }
     };
 
@@ -376,12 +355,13 @@ export const Meeting = () => {
 
     return () => {
       // Cleanup WebSocket listeners
-      webSocketService.off('ready', handleWebSocketMessage);
-      webSocketService.off('peer-joined', handleWebSocketMessage);
-      webSocketService.off('offer', handleWebSocketMessage);
-      webSocketService.off('answer', handleWebSocketMessage);
-      webSocketService.off('ice-candidate', handleWebSocketMessage);
-      webSocketService.off('peer-left', handleWebSocketMessage);
+      webSocketService.off('ready', readyHandler);
+      webSocketService.off('peer-joined', peerJoinedHandler);
+      webSocketService.off('offer', offerHandler);
+      webSocketService.off('answer', answerHandler);
+      webSocketService.off('ice-candidate', iceCandidateHandler);
+      webSocketService.off('peer-left', peerLeftHandler);
+      webSocketService.off('media-state-changed', mediaStateChangedHandler);
 
       // Close all peer connections
       peerConnectionsRef.current.forEach((pc) => pc.close());
@@ -390,7 +370,25 @@ export const Meeting = () => {
       // Disconnect WebSocket
       webSocketService.disconnect();
     };
-  }, [meeting?.id, handleWebSocketMessage]);
+  }, [meeting?.id, isMediaReady, handleWebSocketMessage]);
+
+  // Add local tracks to existing peer connections when media becomes ready
+  useEffect(() => {
+    if (!isMediaReady || !localStreamRef.current) return;
+
+    // Add tracks to all existing peer connections
+    peerConnectionsRef.current.forEach((peerConnection) => {
+      const senders = peerConnection.getSenders();
+      const tracks = localStreamRef.current!.getTracks();
+
+      // Check if tracks are already added
+      if (senders.length === 0) {
+        tracks.forEach((track) => {
+          peerConnection.addTrack(track, localStreamRef.current!);
+        });
+      }
+    });
+  }, [isMediaReady]);
 
   // Initialize media devices
   const initializeMedia = async () => {
@@ -415,6 +413,7 @@ export const Meeting = () => {
       setupAudioAnalyser(stream);
 
       setMediaError(null);
+      setIsMediaReady(true);
       return true;
     } catch (err) {
       console.error('Failed to get media devices:', err);
@@ -495,10 +494,22 @@ export const Meeting = () => {
   const toggleAudio = () => {
     if (localStreamRef.current) {
       const audioTracks = localStreamRef.current.getAudioTracks();
+      const newAudioState = !isAudioEnabled;
       audioTracks.forEach((track) => {
-        track.enabled = !isAudioEnabled;
+        track.enabled = newAudioState;
       });
-      setIsAudioEnabled(!isAudioEnabled);
+      setIsAudioEnabled(newAudioState);
+
+      // Broadcast audio state change to other participants
+      if (meeting?.id) {
+        webSocketService.send({
+          type: 'media-state-changed',
+          data: {
+            is_muted: !newAudioState,
+            is_video_on: isVideoEnabled,
+          },
+        });
+      }
     }
   };
 
@@ -522,6 +533,17 @@ export const Meeting = () => {
       }
 
       setIsVideoEnabled(false);
+
+      // Broadcast video state change
+      if (meeting?.id) {
+        webSocketService.send({
+          type: 'media-state-changed',
+          data: {
+            is_muted: !isAudioEnabled,
+            is_video_on: false,
+          },
+        });
+      }
     } else {
       // Turn on video - get new video stream
       try {
@@ -543,6 +565,17 @@ export const Meeting = () => {
         }
 
         setIsVideoEnabled(true);
+
+        // Broadcast video state change
+        if (meeting?.id) {
+          webSocketService.send({
+            type: 'media-state-changed',
+            data: {
+              is_muted: !isAudioEnabled,
+              is_video_on: true,
+            },
+          });
+        }
       } catch (err) {
         console.error('Failed to enable video:', err);
         setMediaError('Failed to access camera. Please check permissions.');
@@ -629,10 +662,8 @@ export const Meeting = () => {
             transformMessageResponse(msg)
           );
           setMessages(transformedMessages);
-          console.log('[Chat] Loaded', transformedMessages.length, 'messages from history');
         } catch (chatErr) {
           console.error('[Chat] Failed to load chat history:', chatErr);
-          // Don't fail the whole meeting join if chat history fails
         }
 
       } catch (err) {
@@ -700,14 +731,9 @@ export const Meeting = () => {
     try {
       // Send message to backend - will be broadcast via SSE to all participants
       await apiService.sendChatMessage(meeting.id, inputMessage);
-
-      // Clear input after successful send
       setInputMessage('');
-
-      console.log('[Chat] Message sent successfully');
     } catch (error) {
       console.error('[Chat] Failed to send message:', error);
-      // TODO: Show error notification to user
     }
   };
 
@@ -879,56 +905,56 @@ export const Meeting = () => {
             </div>
 
             {/* Remote participants */}
-            {remoteParticipants.map((participant) => (
-              <div
-                key={participant.id}
-                className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
-              >
-                {/* Remote video element */}
-                {participant.stream ? (
+            {remoteParticipants.map((participant) => {
+              return (
+                <div
+                  key={participant.id}
+                  className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
+                >
+                  {/* Remote video element - always mounted */}
                   <video
                     ref={(el) => {
                       if (el) {
                         remoteVideoRefs.current.set(participant.user.id, el);
-                        if (participant.stream) {
-                          el.srcObject = participant.stream;
-                        }
                       }
                     }}
                     autoPlay
                     playsInline
-                    className="w-full h-full object-cover"
+                    className={`w-full h-full object-cover ${participant.stream ? 'block' : 'hidden'}`}
                   />
-                ) : (
-                  <div className="flex flex-col items-center justify-center">
-                    <div className="w-12 h-12 sm:w-16 sm:h-16 md:w-20 md:h-20 bg-gray-700 rounded-full flex items-center justify-center mb-1 sm:mb-2">
-                      <UserIcon className="w-6 h-6 sm:w-10 sm:h-10 md:w-12 md:h-12 text-gray-500" />
-                    </div>
-                    <span className="text-white text-xs sm:text-sm">{participant.user.name}</span>
-                  </div>
-                )}
 
-                {/* Participant info overlay */}
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-white text-xs sm:text-sm font-medium truncate">
-                      {participant.user.name}
-                      {participant.role === 'host' && (
-                        <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
-                      )}
-                    </span>
-                    <div className="flex items-center space-x-1 sm:space-x-2">
-                      {participant.is_muted && (
-                        <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
-                      )}
-                      {!participant.is_video_on && (
-                        <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
-                      )}
+                  {/* Placeholder when no stream */}
+                  {!participant.stream && (
+                    <div className="flex flex-col items-center justify-center absolute inset-0">
+                      <div className="w-12 h-12 sm:w-16 sm:h-16 md:w-20 md:h-20 bg-gray-700 rounded-full flex items-center justify-center mb-1 sm:mb-2">
+                        <UserIcon className="w-6 h-6 sm:w-10 sm:h-10 md:w-12 md:h-12 text-gray-500" />
+                      </div>
+                      <span className="text-white text-xs sm:text-sm">{participant.user.name}</span>
+                    </div>
+                  )}
+
+                  {/* Participant info overlay */}
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-white text-xs sm:text-sm font-medium truncate">
+                        {participant.user.name}
+                        {participant.role === 'host' && (
+                          <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
+                        )}
+                      </span>
+                      <div className="flex items-center space-x-1 sm:space-x-2">
+                        {participant.is_muted && (
+                          <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                        )}
+                        {!participant.is_video_on && (
+                          <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
