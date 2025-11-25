@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { VideoCameraIcon, PlusIcon, ArrowRightOnRectangleIcon } from '@heroicons/react/24/outline';
 import { apiService } from '../services';
 import { Modal } from '../components/Common/Modal';
+import { ProfileAvatar } from '../components/Profile/ProfileAvatar';
 
 export const Home = () => {
   const navigate = useNavigate();
@@ -56,18 +57,24 @@ export const Home = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4">
-      <div className="max-w-4xl w-full">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <div className="flex items-center justify-center mb-6">
-            <VideoCameraIcon className="w-16 h-16 text-blue-500" />
+    <div className="min-h-screen bg-gray-900 flex flex-col p-4">
+      {/* Profile Avatar - Top Right */}
+      <div className="absolute top-4 right-4 md:top-6 md:right-6">
+        <ProfileAvatar />
+      </div>
+
+      <div className="flex-1 flex flex-col items-center justify-center">
+        <div className="max-w-4xl w-full">
+          {/* Header */}
+          <div className="text-center mb-12">
+            <div className="flex items-center justify-center mb-6">
+              <VideoCameraIcon className="w-16 h-16 text-blue-500" />
+            </div>
+            <h1 className="text-5xl font-bold text-white mb-4">Meet App</h1>
+            <p className="text-xl text-gray-400">
+              Secure video meetings for everyone
+            </p>
           </div>
-          <h1 className="text-5xl font-bold text-white mb-4">Meet App</h1>
-          <p className="text-xl text-gray-400">
-            Secure video meetings for everyone
-          </p>
-        </div>
 
         {/* Main actions */}
         <div className="grid md:grid-cols-2 gap-6 mb-8">
@@ -152,6 +159,7 @@ export const Home = () => {
               Host large meetings effortlessly
             </p>
           </div>
+        </div>
         </div>
       </div>
 
