@@ -119,6 +119,44 @@ export const Meeting = () => {
     onError: (error) => console.error('SSE error:', error),
   });
 
+  // Join meeting and load participants (called after approval)
+  const joinMeetingAndLoadData = useCallback(async (meetingData: MeetingType) => {
+    try {
+      // Try to join the meeting
+      try {
+        await apiService.joinMeeting(meetingData.code);
+      } catch (joinError) {
+        // Ignore "already in meeting" error - this is OK for hosts
+        const axiosError = joinError as AxiosError<{ error?: string }>;
+        const errorMessage = axiosError.response?.data?.error || '';
+
+        if (!errorMessage.toLowerCase().includes('already') &&
+            axiosError.response?.status !== 409) {
+          throw joinError;
+        }
+      }
+
+      // Get participants
+      const participantList = await apiService.getParticipants(meetingData.id);
+      setParticipants(participantList);
+
+      // Load chat history
+      try {
+        const chatHistory = await apiService.getChatHistory(meetingData.id);
+        // Transform backend MessageResponse[] to ChatMessage[]
+        const transformedMessages = chatHistory.map((msg: MessageResponse) =>
+          transformMessageResponse(msg)
+        );
+        setMessages(transformedMessages);
+      } catch (chatErr) {
+        console.error('[Chat] Failed to load chat history:', chatErr);
+      }
+    } catch (err) {
+      console.error('Failed to join meeting:', err);
+      setError('Failed to join meeting. Please try again.');
+    }
+  }, []);
+
   // WebRTC: Create peer connection
   const createPeerConnection = useCallback(async (peerId: string) => {
     // Check if peer connection already exists
@@ -342,6 +380,14 @@ export const Meeting = () => {
         console.log('[Join Approval] Join request approved');
         setIsWaitingForApproval(false);
         setIsJoinApproved(true);
+
+        // Now join the meeting and load participants
+        if (meeting) {
+          joinMeetingAndLoadData(meeting).catch((err) => {
+            console.error('[Join Approval] Failed to join meeting after approval:', err);
+            setError('Failed to join meeting after approval. Please try again.');
+          });
+        }
         break;
       }
 
@@ -356,7 +402,7 @@ export const Meeting = () => {
       default:
         console.warn('[WebRTC] Unknown message type:', message.type);
     }
-  }, [createPeerConnection]);
+  }, [createPeerConnection, meeting, joinMeetingAndLoadData]);
 
   // WebSocket: Connect for join approval (only after media is ready)
   useEffect(() => {
@@ -392,8 +438,14 @@ export const Meeting = () => {
               email: currentUser.email,
             },
           });
-        } else {
-          // Host joins immediately
+        } else if (isHost) {
+          // Host sends host-join message to get auto-approved
+          console.log('[Join Approval] Host sending host-join message');
+          webSocketService.send({
+            type: 'host-join',
+            data: {},
+          });
+          // Host is auto-approved
           setIsJoinApproved(true);
         }
       } catch (error) {
@@ -737,41 +789,20 @@ export const Meeting = () => {
         const meetingData = await apiService.getMeetingByCode(meetingCode);
         setMeeting(meetingData);
 
-        // Try to join the meeting
-        try {
-          await apiService.joinMeeting(meetingCode);
-        } catch (joinError) {
-          // Ignore "already in meeting" error - this is OK for hosts
-          const axiosError = joinError as AxiosError<{ error?: string }>;
-          const errorMessage = axiosError.response?.data?.error || '';
-
-          if (!errorMessage.toLowerCase().includes('already') &&
-              axiosError.response?.status !== 409) {
-            throw joinError;
-          }
-        }
-
         // Get current user from API to ensure we have correct ID
         const currentUser = await apiService.getMe();
         const currentUserIdStr = String(currentUser.id);
         setCurrentUserId(currentUserIdStr);
         setCurrentUserName(currentUser.name);
 
-        // Get participants
-        const participantList = await apiService.getParticipants(meetingData.id);
-        setParticipants(participantList);
+        // Check if current user is host
+        const isHost = currentUserIdStr === String(meetingData.host_id);
 
-        // Load chat history
-        try {
-          const chatHistory = await apiService.getChatHistory(meetingData.id);
-          // Transform backend MessageResponse[] to ChatMessage[]
-          const transformedMessages = chatHistory.map((msg: MessageResponse) =>
-            transformMessageResponse(msg)
-          );
-          setMessages(transformedMessages);
-        } catch (chatErr) {
-          console.error('[Chat] Failed to load chat history:', chatErr);
+        // If host, join immediately
+        if (isHost) {
+          await joinMeetingAndLoadData(meetingData);
         }
+        // If not host, wait for approval before joining
 
       } catch (err) {
         console.error('Failed to initialize meeting:', err);

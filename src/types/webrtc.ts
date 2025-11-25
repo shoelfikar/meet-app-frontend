@@ -8,6 +8,7 @@ export type SignalType =
   | 'peer-left'
   | 'ready'
   | 'media-state-changed'
+  | 'host-join'
   | 'join-request'
   | 'join-request-pending'
   | 'pending-join-request'
