@@ -921,6 +921,7 @@ export const Meeting = () => {
                     autoPlay
                     playsInline
                     className={`w-full h-full object-cover ${participant.stream ? 'block' : 'hidden'}`}
+                    style={{ transform: 'scaleX(-1)' }}
                   />
 
                   {/* Placeholder when no stream */}
