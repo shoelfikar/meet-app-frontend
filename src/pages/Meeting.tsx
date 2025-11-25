@@ -1,9 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  UserIcon,
-} from '@heroicons/react/24/solid';
-import {
   MicrophoneIcon as MicOffIcon,
   VideoCameraSlashIcon,
 } from '@heroicons/react/24/outline';
@@ -15,12 +12,15 @@ import { webSocketService } from '../services/websocket';
 // import { webRTCService } from '../services/webrtc';
 import { Modal } from '../components/Common/Modal';
 import { Header } from '../components/Common/Header';
+import { Avatar } from '../components/Common/Avatar';
 import { ChatPanel } from '../components/Chat/ChatPanel';
 import { ErrorMessage } from '../components/Error/ErrorMessage';
 import { MediaControls } from '../components/Controls/MediaControls';
+import { JoinRequestPopup } from '../components/Meeting/JoinRequestPopup';
+import { WaitingForApproval } from '../components/Meeting/WaitingForApproval';
 import { useSSE } from '../hooks/useSSE';
 import type { AxiosError } from 'axios';
-import type { WebSocketMessage } from '../types/webrtc';
+import type { WebSocketMessage, JoinRequestInfo } from '../types/webrtc';
 
 export const Meeting = () => {
   const { meetingCode } = useParams<{ meetingCode: string }>();
@@ -39,6 +39,7 @@ export const Meeting = () => {
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
   const [participants, setParticipants] = useState<MeetingParticipant[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,6 +56,11 @@ export const Meeting = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [showLeaveModal, setShowLeaveModal] = useState(false);
+
+  // Join approval state
+  const [isWaitingForApproval, setIsWaitingForApproval] = useState(false);
+  const [pendingJoinRequests, setPendingJoinRequests] = useState<JoinRequestInfo[]>([]);
+  const [isJoinApproved, setIsJoinApproved] = useState(false);
 
   // SSE event handler for real-time updates
   const handleSSEMessage = useCallback((event: SSEEvent) => {
@@ -316,36 +322,80 @@ export const Meeting = () => {
         break;
       }
 
+      case 'join-request-pending': {
+        // User's join request is pending approval
+        console.log('[Join Approval] Join request is pending');
+        setIsWaitingForApproval(true);
+        break;
+      }
+
+      case 'pending-join-request': {
+        // Host received a join request
+        const joinRequest = message.data as JoinRequestInfo;
+        console.log('[Join Approval] New join request from:', joinRequest.username);
+        setPendingJoinRequests((prev) => [...prev, joinRequest]);
+        break;
+      }
+
+      case 'join-approved': {
+        // User's join request was approved
+        console.log('[Join Approval] Join request approved');
+        setIsWaitingForApproval(false);
+        setIsJoinApproved(true);
+        break;
+      }
+
+      case 'join-rejected': {
+        // User's join request was rejected
+        console.log('[Join Approval] Join request rejected');
+        setIsWaitingForApproval(false);
+        setError('Your join request was rejected by the host');
+        break;
+      }
+
       default:
         console.warn('[WebRTC] Unknown message type:', message.type);
     }
   }, [createPeerConnection]);
 
-  // WebSocket: Connect and setup listeners (only after media is ready)
+  // WebSocket: Connect for join approval (only after media is ready)
   useEffect(() => {
     if (!meeting?.id || !isMediaReady) return;
 
-    // Create wrapper handlers
-    const readyHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const peerJoinedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const offerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const answerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const iceCandidateHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const peerLeftHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const mediaStateChangedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    // Create wrapper handlers for join approval
+    const joinRequestPendingHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const pendingJoinRequestHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const joinApprovedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const joinRejectedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
 
     const connectWebSocket = async () => {
       try {
         await webSocketService.connect(meeting.id);
 
-        // Setup message handlers
-        webSocketService.on('ready', readyHandler);
-        webSocketService.on('peer-joined', peerJoinedHandler);
-        webSocketService.on('offer', offerHandler);
-        webSocketService.on('answer', answerHandler);
-        webSocketService.on('ice-candidate', iceCandidateHandler);
-        webSocketService.on('peer-left', peerLeftHandler);
-        webSocketService.on('media-state-changed', mediaStateChangedHandler);
+        // Setup join approval handlers
+        webSocketService.on('join-request-pending', joinRequestPendingHandler);
+        webSocketService.on('pending-join-request', pendingJoinRequestHandler);
+        webSocketService.on('join-approved', joinApprovedHandler);
+        webSocketService.on('join-rejected', joinRejectedHandler);
+
+        // Check if current user is host
+        const isHost = currentUserId === String(meeting.host_id);
+
+        // If not host, send join request
+        if (!isHost && currentUserId) {
+          console.log('[Join Approval] Sending join request to host');
+          const currentUser = await apiService.getMe();
+          webSocketService.send({
+            type: 'join-request',
+            data: {
+              host_user_id: String(meeting.host_id),
+              email: currentUser.email,
+            },
+          });
+        } else {
+          // Host joins immediately
+          setIsJoinApproved(true);
+        }
       } catch (error) {
         console.error('[WebSocket] Failed to connect:', error);
       }
@@ -354,7 +404,40 @@ export const Meeting = () => {
     connectWebSocket();
 
     return () => {
-      // Cleanup WebSocket listeners
+      // Cleanup join approval listeners
+      webSocketService.off('join-request-pending', joinRequestPendingHandler);
+      webSocketService.off('pending-join-request', pendingJoinRequestHandler);
+      webSocketService.off('join-approved', joinApprovedHandler);
+      webSocketService.off('join-rejected', joinRejectedHandler);
+    };
+  }, [meeting?.id, isMediaReady, currentUserId, handleWebSocketMessage]);
+
+  // WebSocket: Setup WebRTC handlers (only after join is approved)
+  useEffect(() => {
+    if (!meeting?.id || !isJoinApproved) return;
+
+    console.log('[WebRTC] Join approved, setting up WebRTC handlers');
+
+    // Create wrapper handlers for WebRTC
+    const readyHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const peerJoinedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const offerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const answerHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const iceCandidateHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const peerLeftHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const mediaStateChangedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+
+    // Setup WebRTC message handlers
+    webSocketService.on('ready', readyHandler);
+    webSocketService.on('peer-joined', peerJoinedHandler);
+    webSocketService.on('offer', offerHandler);
+    webSocketService.on('answer', answerHandler);
+    webSocketService.on('ice-candidate', iceCandidateHandler);
+    webSocketService.on('peer-left', peerLeftHandler);
+    webSocketService.on('media-state-changed', mediaStateChangedHandler);
+
+    return () => {
+      // Cleanup WebRTC listeners
       webSocketService.off('ready', readyHandler);
       webSocketService.off('peer-joined', peerJoinedHandler);
       webSocketService.off('offer', offerHandler);
@@ -367,10 +450,12 @@ export const Meeting = () => {
       peerConnectionsRef.current.forEach((pc) => pc.close());
       peerConnectionsRef.current.clear();
 
-      // Disconnect WebSocket
-      webSocketService.disconnect();
+      // Disconnect WebSocket when leaving
+      if (!meeting?.id) {
+        webSocketService.disconnect();
+      }
     };
-  }, [meeting?.id, isMediaReady, handleWebSocketMessage]);
+  }, [meeting?.id, isJoinApproved, handleWebSocketMessage]);
 
   // Add local tracks to existing peer connections when media becomes ready
   useEffect(() => {
@@ -525,6 +610,15 @@ export const Meeting = () => {
         localStreamRef.current?.removeTrack(track);
       });
 
+      // Replace video track with null in all peer connections
+      peerConnectionsRef.current.forEach((peerConnection) => {
+        const senders = peerConnection.getSenders();
+        const videoSender = senders.find(sender => sender.track?.kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(null);
+        }
+      });
+
       // Clear video element to fully release camera
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = null;
@@ -557,6 +651,18 @@ export const Meeting = () => {
 
         const newVideoTrack = videoStream.getVideoTracks()[0];
         localStreamRef.current.addTrack(newVideoTrack);
+
+        // Replace video track in all peer connections
+        peerConnectionsRef.current.forEach((peerConnection) => {
+          const senders = peerConnection.getSenders();
+          const videoSender = senders.find(sender => sender.track?.kind === 'video' || (sender.track === null && senders.length > 1));
+          if (videoSender) {
+            videoSender.replaceTrack(newVideoTrack);
+          } else {
+            // If no video sender exists, add the new track
+            peerConnection.addTrack(newVideoTrack, localStreamRef.current!);
+          }
+        });
 
         // Update video element
         if (localVideoRef.current) {
@@ -649,6 +755,7 @@ export const Meeting = () => {
         const currentUser = await apiService.getMe();
         const currentUserIdStr = String(currentUser.id);
         setCurrentUserId(currentUserIdStr);
+        setCurrentUserName(currentUser.name);
 
         // Get participants
         const participantList = await apiService.getParticipants(meetingData.id);
@@ -725,6 +832,36 @@ export const Meeting = () => {
     setShowLeaveModal(false);
   };
 
+  // Join approval handlers
+  const handleApproveJoinRequest = (userId: string) => {
+    console.log('[Join Approval] Approving join request for:', userId);
+    webSocketService.send({
+      type: 'approve-join-request',
+      data: {
+        user_id: userId,
+      },
+    });
+    // Remove from pending requests
+    setPendingJoinRequests((prev) => prev.filter((req) => req.user_id !== userId));
+  };
+
+  const handleRejectJoinRequest = (userId: string) => {
+    console.log('[Join Approval] Rejecting join request for:', userId);
+    webSocketService.send({
+      type: 'reject-join-request',
+      data: {
+        user_id: userId,
+      },
+    });
+    // Remove from pending requests
+    setPendingJoinRequests((prev) => prev.filter((req) => req.user_id !== userId));
+  };
+
+  const handleCancelWaiting = () => {
+    stopMediaTracks();
+    navigate('/');
+  };
+
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || !meeting?.id) return;
 
@@ -795,6 +932,16 @@ export const Meeting = () => {
     );
   }
 
+  // Waiting for approval state
+  if (isWaitingForApproval && !isJoinApproved) {
+    return (
+      <WaitingForApproval
+        meetingTitle={meeting.title}
+        onCancel={handleCancelWaiting}
+      />
+    );
+  }
+
   // Filter out current user from participants (to avoid duplicate with local video)
   const remoteParticipants = participants.filter(
     (participant) => {
@@ -854,10 +1001,8 @@ export const Meeting = () => {
               {/* Placeholder when video is off */}
               {!isVideoEnabled && (
                 <div className="flex flex-col items-center justify-center absolute inset-0">
-                  <div className="w-12 h-12 sm:w-16 sm:h-16 md:w-20 md:h-20 bg-gray-700 rounded-full flex items-center justify-center mb-1 sm:mb-2">
-                    <UserIcon className="w-6 h-6 sm:w-10 sm:h-10 md:w-12 md:h-12 text-gray-500" />
-                  </div>
-                  <span className="text-white text-xs sm:text-sm">You</span>
+                  <Avatar name={currentUserName || 'You'} size="medium" />
+                  <span className="text-white text-xs sm:text-sm mt-2">You</span>
                 </div>
               )}
 
@@ -920,17 +1065,15 @@ export const Meeting = () => {
                     }}
                     autoPlay
                     playsInline
-                    className={`w-full h-full object-cover ${participant.stream ? 'block' : 'hidden'}`}
+                    className={`w-full h-full object-cover ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
                     style={{ transform: 'scaleX(-1)' }}
                   />
 
-                  {/* Placeholder when no stream */}
-                  {!participant.stream && (
+                  {/* Placeholder when video is off or no stream */}
+                  {(!participant.stream || !participant.is_video_on) && (
                     <div className="flex flex-col items-center justify-center absolute inset-0">
-                      <div className="w-12 h-12 sm:w-16 sm:h-16 md:w-20 md:h-20 bg-gray-700 rounded-full flex items-center justify-center mb-1 sm:mb-2">
-                        <UserIcon className="w-6 h-6 sm:w-10 sm:h-10 md:w-12 md:h-12 text-gray-500" />
-                      </div>
-                      <span className="text-white text-xs sm:text-sm">{participant.user.name}</span>
+                      <Avatar name={participant.user.name} size="medium" />
+                      <span className="text-white text-xs sm:text-sm mt-2">{participant.user.name}</span>
                     </div>
                   )}
 
@@ -1005,6 +1148,15 @@ export const Meeting = () => {
           },
         ]}
       />
+
+      {/* Join Request Popup for Host */}
+      {isCurrentUserHost && (
+        <JoinRequestPopup
+          requests={pendingJoinRequests}
+          onApprove={handleApproveJoinRequest}
+          onReject={handleRejectJoinRequest}
+        />
+      )}
     </div>
   );
 };

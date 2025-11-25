@@ -8,6 +8,13 @@ export type SignalType =
   | 'peer-left'
   | 'ready'
   | 'media-state-changed'
+  | 'join-request'
+  | 'join-request-pending'
+  | 'pending-join-request'
+  | 'approve-join-request'
+  | 'reject-join-request'
+  | 'join-approved'
+  | 'join-rejected'
   | 'error';
 
 export interface WebSocketMessage<T = any> {
@@ -46,6 +53,13 @@ export interface SignalICECandidateMessage extends WebSocketMessage {
 export interface PeerInfo {
   user_id: string;
   username: string;
+}
+
+export interface JoinRequestInfo {
+  user_id: string;
+  username: string;
+  email: string;
+  timestamp: number;
 }
 
 export interface PeerConnectionConfig {
