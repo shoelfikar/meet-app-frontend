@@ -90,7 +90,7 @@ export const Home = () => {
             <button
               onClick={handleCreateMeeting}
               disabled={isCreating}
-              className="btn-primary w-full"
+              className="btn-primary w-full cursor-pointer"
             >
               {isCreating ? 'Creating...' : 'Create Meeting'}
             </button>
@@ -116,7 +116,7 @@ export const Home = () => {
               <button
                 type="submit"
                 disabled={isJoining || !meetingCode.trim()}
-                className="btn-primary w-full"
+                className="btn-primary w-full cursor-pointer"
               >
                 {isJoining ? 'Joining...' : 'Join'}
               </button>

@@ -1,15 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   MicrophoneIcon,
   VideoCameraIcon,
   PhoneIcon,
   ChatBubbleLeftIcon,
-  ComputerDesktopIcon,
+  EllipsisVerticalIcon,
 } from '@heroicons/react/24/solid';
 import {
   MicrophoneIcon as MicOffIcon,
   VideoCameraSlashIcon,
 } from '@heroicons/react/24/outline';
+import { DeviceSettingsPopup } from './DeviceSettingsPopup';
+import { ScreenShareButton } from './ScreenShareButton';
 
 interface MediaControlsProps {
   // Audio controls
@@ -30,6 +32,12 @@ interface MediaControlsProps {
   messageCount: number;
   onToggleChat: () => void;
 
+  // Device settings
+  currentAudioDeviceId: string;
+  currentVideoDeviceId: string;
+  onAudioDeviceChange: (deviceId: string) => void;
+  onVideoDeviceChange: (deviceId: string) => void;
+
   // Leave
   onLeave: () => void;
 }
@@ -45,12 +53,19 @@ export const MediaControls: React.FC<MediaControlsProps> = ({
   isChatOpen,
   messageCount,
   onToggleChat,
+  currentAudioDeviceId,
+  currentVideoDeviceId,
+  onAudioDeviceChange,
+  onVideoDeviceChange,
   onLeave,
 }) => {
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   return (
-    <div className="flex items-center justify-center space-x-2 sm:space-x-3 px-2 sm:px-4 py-2 sm:py-2.5 bg-gray-800 border-t border-gray-700">
-      {/* Audio toggle */}
-      <button
+    <>
+      <div className="flex items-center justify-center space-x-2 sm:space-x-3 px-2 sm:px-4 py-2 sm:py-2.5 bg-gray-800 border-t border-gray-700">
+        {/* Audio toggle */}
+        <button
         onClick={onToggleAudio}
         className={`relative p-2 sm:p-2.5 md:p-3 rounded-full transition-colors cursor-pointer touch-manipulation ${
           isAudioEnabled
@@ -96,17 +111,11 @@ export const MediaControls: React.FC<MediaControlsProps> = ({
       </button>
 
       {/* Screen share toggle */}
-      <button
-        onClick={onToggleScreenShare}
-        className={`p-2 sm:p-2.5 md:p-3 rounded-full transition-colors cursor-pointer touch-manipulation hidden sm:flex ${
-          isScreenSharing
-            ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-700 text-white'
-            : 'bg-gray-700 hover:bg-gray-600 active:bg-gray-600 text-white'
-        }`}
-        title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
-      >
-        <ComputerDesktopIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-      </button>
+      <ScreenShareButton
+        isScreenSharing={isScreenSharing}
+        onToggleScreenShare={onToggleScreenShare}
+        className="hidden sm:flex"
+      />
 
       {/* Chat toggle */}
       <button
@@ -122,6 +131,15 @@ export const MediaControls: React.FC<MediaControlsProps> = ({
         )}
       </button>
 
+      {/* Device Settings */}
+      <button
+        onClick={() => setIsSettingsOpen(true)}
+        className="p-2 sm:p-2.5 md:p-3 rounded-full bg-gray-700 hover:bg-gray-600 active:bg-gray-600 text-white transition-colors cursor-pointer touch-manipulation"
+        title="Device settings"
+      >
+        <EllipsisVerticalIcon className="w-4 h-4 sm:w-5 sm:h-5" />
+      </button>
+
       {/* Leave button */}
       <button
         onClick={onLeave}
@@ -131,6 +149,17 @@ export const MediaControls: React.FC<MediaControlsProps> = ({
         <PhoneIcon className="w-4 h-4 sm:w-5 sm:h-5 transform rotate-135" />
       </button>
     </div>
+
+    {/* Device Settings Popup */}
+    <DeviceSettingsPopup
+      isOpen={isSettingsOpen}
+      onClose={() => setIsSettingsOpen(false)}
+      currentAudioDeviceId={currentAudioDeviceId}
+      currentVideoDeviceId={currentVideoDeviceId}
+      onAudioDeviceChange={onAudioDeviceChange}
+      onVideoDeviceChange={onVideoDeviceChange}
+    />
+    </>
   );
 };
 

@@ -4,6 +4,7 @@ import {
   MicrophoneIcon as MicOffIcon,
   VideoCameraSlashIcon,
 } from '@heroicons/react/24/outline';
+import { ComputerDesktopIcon } from '@heroicons/react/24/solid';
 import type { Meeting as MeetingType, MeetingParticipant, ChatMessage, SSEEvent } from '../types';
 import type { MessageResponse } from '../types/message';
 import { transformMessageResponse } from '../types/message';
@@ -18,7 +19,10 @@ import { ErrorMessage } from '../components/Error/ErrorMessage';
 import { MediaControls } from '../components/Controls/MediaControls';
 import { JoinRequestPopup } from '../components/Meeting/JoinRequestPopup';
 import { WaitingForApproval } from '../components/Meeting/WaitingForApproval';
+import { ScreenShareView } from '../components/Meeting/ScreenShareView';
+import { ScreenShareIndicator } from '../components/Meeting/ScreenShareIndicator';
 import { useSSE } from '../hooks/useSSE';
+import { useScreenShare } from '../hooks/useScreenShare';
 import type { AxiosError } from 'axios';
 import type { WebSocketMessage, JoinRequestInfo } from '../types/webrtc';
 
@@ -34,6 +38,7 @@ export const Meeting = () => {
   const animationFrameRef = useRef<number | null>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const screenTrackSendersRef = useRef<Map<string, RTCRtpSender>>(new Map()); // Track screen senders per peer
 
   // Meeting state
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
@@ -46,16 +51,31 @@ export const Meeting = () => {
   // Media state
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isMediaReady, setIsMediaReady] = useState(false);
+  const [currentAudioDeviceId, setCurrentAudioDeviceId] = useState<string>('');
+  const [currentVideoDeviceId, setCurrentVideoDeviceId] = useState<string>('');
+
+  // Screen share hook
+  const {
+    screenStream,
+    isScreenSharing,
+    startScreenShare,
+    stopScreenShare,
+    error: screenShareError,
+  } = useScreenShare();
 
   // UI state
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [showLeaveModal, setShowLeaveModal] = useState(false);
+
+  // Screen share state
+  const [screenSharingUser, setScreenSharingUser] = useState<{ userId: string; username: string } | null>(null);
+  const [remoteScreenStreams, setRemoteScreenStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [isScreenShareMinimized, setIsScreenShareMinimized] = useState(false);
 
   // Join approval state
   const [isWaitingForApproval, setIsWaitingForApproval] = useState(false);
@@ -176,6 +196,16 @@ export const Meeting = () => {
       });
     }
 
+    // Add screen share track if currently sharing
+    if (screenStream && isScreenSharing) {
+      const screenTrack = screenStream.getVideoTracks()[0];
+      if (screenTrack) {
+        const sender = peerConnection.addTrack(screenTrack, screenStream);
+        screenTrackSendersRef.current.set(peerId, sender);
+        console.log('[ScreenShare] Added screen track to new peer:', peerId);
+      }
+    }
+
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
@@ -193,17 +223,38 @@ export const Meeting = () => {
 
     // Handle remote stream
     peerConnection.ontrack = (event) => {
-      const remoteVideo = remoteVideoRefs.current.get(peerId);
-      if (remoteVideo && event.streams[0]) {
-        remoteVideo.srcObject = event.streams[0];
-      }
+      console.log('[WebRTC] Received track from:', peerId, event.track.kind, 'streams:', event.streams.length);
 
-      // Update participant with stream
-      setParticipants((prev) =>
-        prev.map((p) =>
-          p.user.id === peerId ? { ...p, stream: event.streams[0] } : p
-        )
-      );
+      if (event.streams && event.streams.length > 0) {
+        const stream = event.streams[0];
+
+        // Check if this is a screen share track (3rd track or separate stream)
+        // Screen share usually comes as a separate stream or as additional video track
+        const videoTracks = stream.getVideoTracks();
+
+        if (videoTracks.length > 1 || event.streams.length > 1) {
+          // This might be a screen share stream
+          console.log('[WebRTC] Potential screen share track detected from:', peerId);
+          setRemoteScreenStreams((prev) => {
+            const newMap = new Map(prev);
+            newMap.set(peerId, stream);
+            return newMap;
+          });
+        } else {
+          // Regular camera/audio stream
+          const remoteVideo = remoteVideoRefs.current.get(peerId);
+          if (remoteVideo) {
+            remoteVideo.srcObject = stream;
+          }
+
+          // Update participant with stream
+          setParticipants((prev) =>
+            prev.map((p) =>
+              p.user.id === peerId ? { ...p, stream: stream } : p
+            )
+          );
+        }
+      }
     };
 
     // Handle connection state changes
@@ -217,7 +268,7 @@ export const Meeting = () => {
 
     peerConnectionsRef.current.set(peerId, peerConnection);
     return peerConnection;
-  }, []);
+  }, [screenStream, isScreenSharing]);
 
   // WebRTC: Handle WebSocket messages
   const handleWebSocketMessage = useCallback(async (message: WebSocketMessage) => {
@@ -399,6 +450,27 @@ export const Meeting = () => {
         break;
       }
 
+      case 'screen-share-started': {
+        // Remote user started sharing screen
+        const { user_id, username } = message.data as { user_id: string; username: string };
+        console.log('[ScreenShare] User started sharing:', username);
+        setScreenSharingUser({ userId: user_id, username });
+        break;
+      }
+
+      case 'screen-share-stopped': {
+        // Remote user stopped sharing screen
+        const { user_id } = message.data as { user_id: string };
+        console.log('[ScreenShare] User stopped sharing:', user_id);
+        setScreenSharingUser(null);
+        setRemoteScreenStreams((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(user_id);
+          return newMap;
+        });
+        break;
+      }
+
       default:
         console.warn('[WebRTC] Unknown message type:', message.type);
     }
@@ -478,6 +550,8 @@ export const Meeting = () => {
     const iceCandidateHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const peerLeftHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const mediaStateChangedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const screenShareStartedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const screenShareStoppedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
 
     // Setup WebRTC message handlers
     webSocketService.on('ready', readyHandler);
@@ -487,6 +561,8 @@ export const Meeting = () => {
     webSocketService.on('ice-candidate', iceCandidateHandler);
     webSocketService.on('peer-left', peerLeftHandler);
     webSocketService.on('media-state-changed', mediaStateChangedHandler);
+    webSocketService.on('screen-share-started', screenShareStartedHandler);
+    webSocketService.on('screen-share-stopped', screenShareStoppedHandler);
 
     return () => {
       // Cleanup WebRTC listeners
@@ -497,6 +573,8 @@ export const Meeting = () => {
       webSocketService.off('ice-candidate', iceCandidateHandler);
       webSocketService.off('peer-left', peerLeftHandler);
       webSocketService.off('media-state-changed', mediaStateChangedHandler);
+      webSocketService.off('screen-share-started', screenShareStartedHandler);
+      webSocketService.off('screen-share-stopped', screenShareStoppedHandler);
 
       // Close all peer connections
       peerConnectionsRef.current.forEach((pc) => pc.close());
@@ -528,18 +606,34 @@ export const Meeting = () => {
   }, [isMediaReady]);
 
   // Initialize media devices
-  const initializeMedia = async () => {
+  const initializeMedia = async (audioDeviceId?: string, videoDeviceId?: string) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user',
-        },
+        audio: audioDeviceId ? { deviceId: { exact: audioDeviceId } } : true,
+        video: videoDeviceId
+          ? {
+              deviceId: { exact: videoDeviceId },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            }
+          : {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: 'user',
+            },
       });
 
       localStreamRef.current = stream;
+
+      // Store current device IDs
+      const audioTrack = stream.getAudioTracks()[0];
+      const videoTrack = stream.getVideoTracks()[0];
+      if (audioTrack) {
+        setCurrentAudioDeviceId(audioTrack.getSettings().deviceId || '');
+      }
+      if (videoTrack) {
+        setCurrentVideoDeviceId(videoTrack.getSettings().deviceId || '');
+      }
 
       // Attach stream to video element
       if (localVideoRef.current) {
@@ -741,6 +835,189 @@ export const Meeting = () => {
     }
   };
 
+  // Switch audio device
+  const switchAudioDevice = async (deviceId: string) => {
+    if (!localStreamRef.current) return;
+
+    try {
+      // Get new audio stream with selected device
+      const newAudioStream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: deviceId } },
+      });
+
+      const newAudioTrack = newAudioStream.getAudioTracks()[0];
+
+      // Stop old audio track
+      const oldAudioTracks = localStreamRef.current.getAudioTracks();
+      oldAudioTracks.forEach((track) => {
+        track.stop();
+        localStreamRef.current?.removeTrack(track);
+      });
+
+      // Add new audio track to local stream
+      localStreamRef.current.addTrack(newAudioTrack);
+
+      // Replace audio track in all peer connections
+      peerConnectionsRef.current.forEach((peerConnection) => {
+        const senders = peerConnection.getSenders();
+        const audioSender = senders.find((sender) => sender.track?.kind === 'audio');
+        if (audioSender) {
+          audioSender.replaceTrack(newAudioTrack);
+        } else {
+          peerConnection.addTrack(newAudioTrack, localStreamRef.current!);
+        }
+      });
+
+      // Update audio analyser with new track
+      setupAudioAnalyser(localStreamRef.current);
+
+      // Update current device ID
+      setCurrentAudioDeviceId(deviceId);
+
+      // Maintain audio enabled state
+      newAudioTrack.enabled = isAudioEnabled;
+    } catch (err) {
+      console.error('Failed to switch audio device:', err);
+      setMediaError('Failed to switch microphone. Please try again.');
+    }
+  };
+
+  // Switch video device
+  const switchVideoDevice = async (deviceId: string) => {
+    if (!localStreamRef.current || !isVideoEnabled) return;
+
+    try {
+      // Get new video stream with selected device
+      const newVideoStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: { exact: deviceId },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      });
+
+      const newVideoTrack = newVideoStream.getVideoTracks()[0];
+
+      // Stop old video track
+      const oldVideoTracks = localStreamRef.current.getVideoTracks();
+      oldVideoTracks.forEach((track) => {
+        track.stop();
+        localStreamRef.current?.removeTrack(track);
+      });
+
+      // Add new video track to local stream
+      localStreamRef.current.addTrack(newVideoTrack);
+
+      // Replace video track in all peer connections
+      peerConnectionsRef.current.forEach((peerConnection) => {
+        const senders = peerConnection.getSenders();
+        const videoSender = senders.find((sender) => sender.track?.kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(newVideoTrack);
+        } else {
+          peerConnection.addTrack(newVideoTrack, localStreamRef.current!);
+        }
+      });
+
+      // Update video element
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+
+      // Update current device ID
+      setCurrentVideoDeviceId(deviceId);
+    } catch (err) {
+      console.error('Failed to switch video device:', err);
+      setMediaError('Failed to switch camera. Please try again.');
+    }
+  };
+
+  // Toggle screen share
+  const handleToggleScreenShare = async () => {
+    if (isScreenSharing) {
+      // Stop screen sharing
+      stopScreenShare();
+
+      // Remove screen track from all peer connections
+      screenTrackSendersRef.current.forEach((sender, peerId) => {
+        const peerConnection = peerConnectionsRef.current.get(peerId);
+        if (peerConnection) {
+          peerConnection.removeTrack(sender);
+        }
+      });
+      screenTrackSendersRef.current.clear();
+
+      // Notify other participants that screen sharing stopped
+      if (meeting?.id) {
+        webSocketService.send({
+          type: 'screen-share-stopped',
+          data: {
+            user_id: currentUserId,
+          },
+        });
+      }
+    } else {
+      // Start screen sharing
+      const success = await startScreenShare();
+      if (!success && screenShareError) {
+        setMediaError(screenShareError);
+        return;
+      }
+
+      // Wait a bit for screenStream to be available
+      setTimeout(() => {
+        if (screenStream) {
+          const screenTrack = screenStream.getVideoTracks()[0];
+
+          if (screenTrack) {
+            // Add screen track to all existing peer connections
+            peerConnectionsRef.current.forEach((peerConnection, peerId) => {
+              try {
+                const sender = peerConnection.addTrack(screenTrack, screenStream);
+                screenTrackSendersRef.current.set(peerId, sender);
+                console.log('[ScreenShare] Added screen track to peer:', peerId);
+              } catch (error) {
+                console.error('[ScreenShare] Failed to add screen track to peer:', peerId, error);
+              }
+            });
+
+            // Notify other participants that screen sharing started
+            if (meeting?.id && currentUserId) {
+              webSocketService.send({
+                type: 'screen-share-started',
+                data: {
+                  user_id: currentUserId,
+                  username: currentUserName,
+                  timestamp: Date.now(),
+                },
+              });
+            }
+          }
+        }
+      }, 100);
+    }
+  };
+
+  // Display screen share error
+  useEffect(() => {
+    if (screenShareError) {
+      setMediaError(screenShareError);
+    }
+  }, [screenShareError]);
+
+  // Log screen sharing user changes (will be used for UI in Phase 3)
+  useEffect(() => {
+    if (screenSharingUser) {
+      console.log('[ScreenShare] User is sharing:', screenSharingUser.username);
+    }
+  }, [screenSharingUser]);
+
+  // Log remote screen streams (will be used for UI in Phase 3)
+  useEffect(() => {
+    console.log('[ScreenShare] Remote screen streams count:', remoteScreenStreams.size);
+  }, [remoteScreenStreams]);
+
   // Stop all media tracks
   const stopMediaTracks = () => {
     // Stop animation frame
@@ -767,6 +1044,11 @@ export const Meeting = () => {
         track.stop();
       });
       localStreamRef.current = null;
+    }
+
+    // Stop screen sharing if active
+    if (isScreenSharing) {
+      stopScreenShare();
     }
   };
 
@@ -1012,81 +1294,123 @@ export const Meeting = () => {
         </div>
       )}
 
+      {/* Screen Share Indicator - Only for local sharing */}
+      {isScreenSharing && !isScreenShareMinimized && (
+        <div className="px-4 py-2">
+          <ScreenShareIndicator
+            presenterName={currentUserName}
+            isLocalShare={true}
+            onStopSharing={handleToggleScreenShare}
+            onMinimize={() => setIsScreenShareMinimized(true)}
+          />
+        </div>
+      )}
+
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Video grid */}
-        <div className="flex-1 p-2 sm:p-3 md:p-4">
-          <div className={`grid gap-2 sm:gap-3 md:gap-4 h-full ${getGridClass(totalParticipants)} auto-rows-fr`}>
-            {/* Local video (You) */}
-            <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center">
-              {/* Video element - always mounted to prevent re-initialization */}
-              <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className={`w-full h-full object-cover ${isVideoEnabled ? 'block' : 'hidden'}`}
-                style={{ transform: 'scaleX(-1)' }}
-              />
+        {/* Screen Share View - Takes 70% width when LOCAL user is sharing */}
+        {isScreenSharing && !isScreenShareMinimized && (
+          <div className="w-full lg:w-[70%] p-2 sm:p-3 md:p-4">
+            <ScreenShareView
+              stream={screenStream!}
+              presenterName={currentUserName}
+              isLocalShare={true}
+              onMinimize={() => setIsScreenShareMinimized(true)}
+            />
+          </div>
+        )}
 
-              {/* Placeholder when video is off */}
-              {!isVideoEnabled && (
-                <div className="flex flex-col items-center justify-center absolute inset-0">
-                  <Avatar name={currentUserName || 'You'} size="medium" />
-                  <span className="text-white text-xs sm:text-sm mt-2">You</span>
-                </div>
-              )}
+        {/* Video grid - Takes remaining space or full width */}
+        <div className={`${isScreenSharing && !isScreenShareMinimized ? 'w-full lg:w-[30%]' : 'flex-1'} p-2 sm:p-3 md:p-4 flex flex-col`}>
+          {/* Maximize screen share button when minimized - Only for local sharing */}
+          {isScreenSharing && isScreenShareMinimized && (
+            <div className="mb-2">
+              <button
+                onClick={() => setIsScreenShareMinimized(false)}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-center space-x-2 transition-colors"
+              >
+                <ComputerDesktopIcon className="w-4 h-4" />
+                <span>Show your screen share</span>
+              </button>
+            </div>
+          )}
 
-              {/* Audio level indicator */}
-              {isAudioEnabled && audioLevel > 0.05 && (
-                <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex items-end space-x-0.5 h-3 sm:h-4">
-                  <div
-                    className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
-                    style={{ height: `${Math.min(audioLevel * 100, 25)}%` }}
+          {/* Grid layout changes based on screen share state */}
+          {(isScreenSharing || screenSharingUser) && !isScreenShareMinimized ? (
+            // Screen share mode: Fixed size tiles with scrolling
+            <div className="flex-1 overflow-y-auto overflow-x-hidden">
+              <div className="grid gap-3 justify-center" style={{ gridTemplateColumns: 'repeat(auto-fill, 250px)' }}>
+                {/* Local video (You) - Fixed 250x250 in screen share mode */}
+                <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center" style={{ width: '250px', height: '250px' }}>
+                  {/* Video element - always mounted to prevent re-initialization */}
+                  <video
+                    ref={localVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className={`w-full h-full object-cover ${isVideoEnabled ? 'block' : 'hidden'}`}
+                    style={{ transform: 'scaleX(-1)' }}
                   />
-                  <div
-                    className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
-                    style={{ height: `${Math.min(audioLevel * 100, 50)}%` }}
-                  />
-                  <div
-                    className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
-                    style={{ height: `${Math.min(audioLevel * 100, 75)}%` }}
-                  />
-                  <div
-                    className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
-                    style={{ height: `${Math.min(audioLevel * 100, 100)}%` }}
-                  />
-                </div>
-              )}
 
-              {/* Local user info overlay */}
-              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-white text-xs sm:text-sm font-medium truncate">
-                    You
-                    {isCurrentUserHost && (
-                      <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
-                    )}
-                  </span>
-                  <div className="flex items-center space-x-1 sm:space-x-2">
-                    {!isAudioEnabled && (
-                      <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
-                    )}
-                    {!isVideoEnabled && (
-                      <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
-                    )}
+                  {/* Placeholder when video is off */}
+                  {!isVideoEnabled && (
+                    <div className="flex flex-col items-center justify-center absolute inset-0">
+                      <Avatar name={currentUserName || 'You'} size="medium" />
+                      <span className="text-white text-xs sm:text-sm mt-2">You</span>
+                    </div>
+                  )}
+
+                  {/* Audio level indicator */}
+                  {isAudioEnabled && audioLevel > 0.05 && (
+                    <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex items-end space-x-0.5 h-3 sm:h-4">
+                      <div
+                        className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                        style={{ height: `${Math.min(audioLevel * 100, 25)}%` }}
+                      />
+                      <div
+                        className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                        style={{ height: `${Math.min(audioLevel * 100, 50)}%` }}
+                      />
+                      <div
+                        className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                        style={{ height: `${Math.min(audioLevel * 100, 75)}%` }}
+                      />
+                      <div
+                        className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                        style={{ height: `${Math.min(audioLevel * 100, 100)}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Local user info overlay */}
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-white text-xs sm:text-sm font-medium truncate">
+                        You
+                        {isCurrentUserHost && (
+                          <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
+                        )}
+                      </span>
+                      <div className="flex items-center space-x-1 sm:space-x-2">
+                        {!isAudioEnabled && (
+                          <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                        )}
+                        {!isVideoEnabled && (
+                          <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
 
-            {/* Remote participants */}
-            {remoteParticipants.map((participant) => {
-              return (
-                <div
-                  key={participant.id}
-                  className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
-                >
+                {/* Remote participants - Fixed 250x250 in screen share mode */}
+                {remoteParticipants.map((participant) => {
+                  return (
+                    <div
+                      key={participant.id}
+                      className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
+                      style={{ width: '250px', height: '250px' }}
+                    >
                   {/* Remote video element - always mounted */}
                   <video
                     ref={(el) => {
@@ -1127,10 +1451,180 @@ export const Meeting = () => {
                       </div>
                     </div>
                   </div>
+                    </div>
+                  );
+                })}
+
+                {/* Remote screen share - shown as grid item */}
+                {screenSharingUser && !isScreenSharing && remoteScreenStreams.size > 0 && (
+                  <div
+                    className="relative bg-gray-900 rounded-xl overflow-hidden flex items-center justify-center"
+                    style={{ width: '250px', height: '250px' }}
+                  >
+                    <video
+                      ref={(el) => {
+                        if (el) {
+                          el.srcObject = Array.from(remoteScreenStreams.values())[0];
+                        }
+                      }}
+                      autoPlay
+                      playsInline
+                      className="w-full h-full object-contain"
+                      style={{ transform: 'scaleX(1)' }}
+                    />
+                    {/* Screen share indicator overlay */}
+                    <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/70 to-transparent p-2">
+                      <div className="flex items-center space-x-1">
+                        <ComputerDesktopIcon className="w-4 h-4 text-blue-400" />
+                        <span className="text-white text-xs font-medium">{screenSharingUser.username}'s screen</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            // Normal mode: Responsive grid
+            <div className={`grid gap-2 sm:gap-3 md:gap-4 flex-1 ${getGridClass(totalParticipants)} auto-rows-fr`}>
+              {/* Local video (You) */}
+              <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center">
+                {/* Video element - always mounted to prevent re-initialization */}
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className={`w-full h-full object-cover ${isVideoEnabled ? 'block' : 'hidden'}`}
+                  style={{ transform: 'scaleX(-1)' }}
+                />
+
+                {/* Placeholder when video is off */}
+                {!isVideoEnabled && (
+                  <div className="flex flex-col items-center justify-center absolute inset-0">
+                    <Avatar name={currentUserName || 'You'} size="medium" />
+                    <span className="text-white text-xs sm:text-sm mt-2">You</span>
+                  </div>
+                )}
+
+                {/* Audio level indicator */}
+                {isAudioEnabled && audioLevel > 0.05 && (
+                  <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex items-end space-x-0.5 h-3 sm:h-4">
+                    <div
+                      className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                      style={{ height: `${Math.min(audioLevel * 100, 25)}%` }}
+                    />
+                    <div
+                      className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                      style={{ height: `${Math.min(audioLevel * 100, 50)}%` }}
+                    />
+                    <div
+                      className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                      style={{ height: `${Math.min(audioLevel * 100, 75)}%` }}
+                    />
+                    <div
+                      className="w-0.5 sm:w-1 bg-green-500 rounded-sm transition-all duration-75"
+                      style={{ height: `${Math.min(audioLevel * 100, 100)}%` }}
+                    />
+                  </div>
+                )}
+
+                {/* Local user info overlay */}
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white text-xs sm:text-sm font-medium truncate">
+                      You
+                      {isCurrentUserHost && (
+                        <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
+                      )}
+                    </span>
+                    <div className="flex items-center space-x-1 sm:space-x-2">
+                      {!isAudioEnabled && (
+                        <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                      )}
+                      {!isVideoEnabled && (
+                        <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                      )}
+                    </div>
+                  </div>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+
+              {/* Remote participants */}
+              {remoteParticipants.map((participant) => {
+                return (
+                  <div
+                    key={participant.id}
+                    className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center"
+                  >
+                    {/* Remote video element - always mounted */}
+                    <video
+                      ref={(el) => {
+                        if (el) {
+                          remoteVideoRefs.current.set(participant.user.id, el);
+                        }
+                      }}
+                      autoPlay
+                      playsInline
+                      className={`w-full h-full object-cover ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
+                      style={{ transform: 'scaleX(-1)' }}
+                    />
+
+                    {/* Placeholder when video is off or no stream */}
+                    {(!participant.stream || !participant.is_video_on) && (
+                      <div className="flex flex-col items-center justify-center absolute inset-0">
+                        <Avatar name={participant.user.name} size="medium" />
+                        <span className="text-white text-xs sm:text-sm mt-2">{participant.user.name}</span>
+                      </div>
+                    )}
+
+                    {/* Participant info overlay */}
+                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 sm:p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-white text-xs sm:text-sm font-medium truncate">
+                          {participant.user.name}
+                          {participant.role === 'host' && (
+                            <span className="ml-1 sm:ml-2 text-xs bg-blue-600 px-1.5 sm:px-2 py-0.5 rounded">Host</span>
+                          )}
+                        </span>
+                        <div className="flex items-center space-x-1 sm:space-x-2">
+                          {participant.is_muted && (
+                            <MicOffIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                          )}
+                          {!participant.is_video_on && (
+                            <VideoCameraSlashIcon className="w-3 h-3 sm:w-4 sm:h-4 text-red-500" />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Remote screen share - shown as grid item in normal mode */}
+              {screenSharingUser && !isScreenSharing && remoteScreenStreams.size > 0 && (
+                <div className="relative bg-gray-900 rounded-xl overflow-hidden flex items-center justify-center">
+                  <video
+                    ref={(el) => {
+                      if (el) {
+                        el.srcObject = Array.from(remoteScreenStreams.values())[0];
+                      }
+                    }}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-contain"
+                    style={{ transform: 'scaleX(1)' }}
+                  />
+                  {/* Screen share indicator overlay */}
+                  <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/70 to-transparent p-2 sm:p-3">
+                    <div className="flex items-center space-x-2">
+                      <ComputerDesktopIcon className="w-5 h-5 text-blue-400" />
+                      <span className="text-white text-sm font-medium">{screenSharingUser.username}'s screen</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Chat panel */}
@@ -1153,10 +1647,14 @@ export const Meeting = () => {
         isVideoEnabled={isVideoEnabled}
         onToggleVideo={toggleVideo}
         isScreenSharing={isScreenSharing}
-        onToggleScreenShare={() => setIsScreenSharing(!isScreenSharing)}
+        onToggleScreenShare={handleToggleScreenShare}
         isChatOpen={isChatOpen}
         messageCount={messages.length}
         onToggleChat={() => setIsChatOpen(!isChatOpen)}
+        currentAudioDeviceId={currentAudioDeviceId}
+        currentVideoDeviceId={currentVideoDeviceId}
+        onAudioDeviceChange={switchAudioDevice}
+        onVideoDeviceChange={switchVideoDevice}
         onLeave={handleLeaveClick}
       />
 

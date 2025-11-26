@@ -16,6 +16,8 @@ export type SignalType =
   | 'reject-join-request'
   | 'join-approved'
   | 'join-rejected'
+  | 'screen-share-started'
+  | 'screen-share-stopped'
   | 'error';
 
 export interface WebSocketMessage<T = any> {
@@ -60,6 +62,12 @@ export interface JoinRequestInfo {
   user_id: string;
   username: string;
   email: string;
+  timestamp: number;
+}
+
+export interface ScreenShareInfo {
+  user_id: string;
+  username: string;
   timestamp: number;
 }
 
