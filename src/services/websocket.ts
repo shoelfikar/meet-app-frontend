@@ -26,14 +26,12 @@ export class WebSocketService {
       this.ws = new WebSocket(url);
 
       this.ws.onopen = () => {
-        console.log('WebSocket connected');
         this.reconnectAttempts = 0;
         this.startHeartbeat();
         resolve();
       };
 
       this.ws.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
         this.stopHeartbeat();
 
         if (!event.wasClean) {
@@ -120,7 +118,6 @@ export class WebSocketService {
   private handleReconnect(): void {
     if (this.reconnectAttempts < this.maxReconnectAttempts && this.meetingId) {
       this.reconnectAttempts++;
-      console.log(`Reconnecting WebSocket (attempt ${this.reconnectAttempts})...`);
 
       setTimeout(() => {
         if (this.meetingId) {

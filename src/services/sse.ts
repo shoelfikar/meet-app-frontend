@@ -24,7 +24,6 @@ export class SSEService {
     this.eventSource = new EventSource(url);
 
     this.eventSource.onopen = () => {
-      console.log('SSE connected');
       this.reconnectAttempts = 0;
     };
 
@@ -93,7 +92,6 @@ export class SSEService {
   private handleReconnect(): void {
     if (this.reconnectAttempts < this.maxReconnectAttempts && this.meetingId) {
       this.reconnectAttempts++;
-      console.log(`Reconnecting SSE (attempt ${this.reconnectAttempts})...`);
 
       setTimeout(() => {
         if (this.meetingId) {

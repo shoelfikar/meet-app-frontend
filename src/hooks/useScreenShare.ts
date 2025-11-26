@@ -34,7 +34,6 @@ export const useScreenShare = (): UseScreenShareReturn => {
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.onended = () => {
-          console.log('[ScreenShare] User stopped sharing via browser UI');
           stopScreenShare();
         };
       }
@@ -71,7 +70,6 @@ export const useScreenShare = (): UseScreenShareReturn => {
 
       screenStreamRef.current = null;
       setIsScreenSharing(false);
-      console.log('[ScreenShare] Screen sharing stopped');
     }
   }, []);
 

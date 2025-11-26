@@ -39,6 +39,7 @@ export const Meeting = () => {
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const screenTrackSendersRef = useRef<Map<string, RTCRtpSender>>(new Map()); // Track screen senders per peer
+  const participantsRef = useRef<MeetingParticipant[]>([]); // Keep participants in ref for access in callbacks
 
   // Meeting state
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
@@ -202,7 +203,6 @@ export const Meeting = () => {
       if (screenTrack) {
         const sender = peerConnection.addTrack(screenTrack, screenStream);
         screenTrackSendersRef.current.set(peerId, sender);
-        console.log('[ScreenShare] Added screen track to new peer:', peerId);
       }
     }
 
@@ -223,22 +223,43 @@ export const Meeting = () => {
 
     // Handle remote stream
     peerConnection.ontrack = (event) => {
-      console.log('[WebRTC] Received track from:', peerId, event.track.kind, 'streams:', event.streams.length);
-
       if (event.streams && event.streams.length > 0) {
         const stream = event.streams[0];
+        const hasAudio = stream.getAudioTracks().length > 0;
+        const hasVideo = stream.getVideoTracks().length > 0;
+        const isScreenShare = hasVideo && !hasAudio;
 
-        // Check if this is a screen share track (3rd track or separate stream)
-        // Screen share usually comes as a separate stream or as additional video track
-        const videoTracks = stream.getVideoTracks();
-
-        if (videoTracks.length > 1 || event.streams.length > 1) {
-          // This might be a screen share stream
-          console.log('[WebRTC] Potential screen share track detected from:', peerId);
+        if (isScreenShare) {
           setRemoteScreenStreams((prev) => {
             const newMap = new Map(prev);
             newMap.set(peerId, stream);
             return newMap;
+          });
+
+          // Monitor screen share track for ended event
+          const videoTrack = stream.getVideoTracks()[0];
+          if (videoTrack) {
+            videoTrack.onended = () => {
+              console.warn('[WebRTC] Screen share track ended for:', peerId);
+              setRemoteScreenStreams((prev) => {
+                const newMap = new Map(prev);
+                newMap.delete(peerId);
+                return newMap;
+              });
+            };
+
+            videoTrack.onmute = () => {
+              console.warn('[WebRTC] Track muted -', peerId);
+            };
+          }
+
+          // Fallback: Set screenSharingUser if not already set
+          setScreenSharingUser((prevState) => {
+            if (!prevState) {
+              const participant = participantsRef.current.find(p => p.user.id === peerId);
+              return { userId: peerId, username: participant?.user.name || 'Unknown User' };
+            }
+            return prevState;
           });
         } else {
           // Regular camera/audio stream
@@ -247,7 +268,16 @@ export const Meeting = () => {
             remoteVideo.srcObject = stream;
           }
 
-          // Update participant with stream
+          // Monitor tracks for network issues
+          stream.getTracks().forEach((track) => {
+            track.onended = () => {
+              console.warn('[WebRTC] Track ended:', peerId, track.kind);
+            };
+            track.onmute = () => {
+              console.warn('[WebRTC] Track muted:', peerId, track.kind);
+            };
+          });
+
           setParticipants((prev) =>
             prev.map((p) =>
               p.user.id === peerId ? { ...p, stream: stream } : p
@@ -257,12 +287,37 @@ export const Meeting = () => {
       }
     };
 
+    // Handle ICE connection state changes (for network issues)
+    peerConnection.oniceconnectionstatechange = () => {
+      const iceState = peerConnection.iceConnectionState;
+
+      if (iceState === 'failed') {
+        console.warn('[WebRTC] ICE failed:', peerId);
+        handleICERestart(peerId);
+      } else if (iceState === 'disconnected') {
+        setTimeout(() => {
+          if (peerConnection.iceConnectionState === 'disconnected') {
+            console.warn('[WebRTC] ICE disconnected, restarting:', peerId);
+            handleICERestart(peerId);
+          }
+        }, 5000);
+      }
+    };
+
     // Handle connection state changes
     peerConnection.onconnectionstatechange = () => {
-      if (peerConnection.connectionState === 'failed') {
-        console.error('[WebRTC] Connection failed for:', peerId);
-        peerConnection.close();
-        peerConnectionsRef.current.delete(peerId);
+      const connState = peerConnection.connectionState;
+
+      if (connState === 'failed') {
+        console.error('[WebRTC] Connection failed:', peerId);
+        handlePeerReconnection(peerId);
+      } else if (connState === 'disconnected') {
+        setTimeout(() => {
+          if (peerConnection.connectionState === 'disconnected') {
+            console.warn('[WebRTC] Connection disconnected, reconnecting:', peerId);
+            handlePeerReconnection(peerId);
+          }
+        }, 5000);
       }
     };
 
@@ -305,11 +360,20 @@ export const Meeting = () => {
       }
 
       case 'offer': {
-        // Received offer from existing peer, create answer
+        // Received offer from peer (could be initial or renegotiation)
         const peerId = message.from!;
 
         try {
-          const peerConnection = await createPeerConnection(peerId);
+          // Check if peer connection already exists (renegotiation) or needs to be created (initial)
+          let peerConnection = peerConnectionsRef.current.get(peerId);
+
+          if (!peerConnection) {
+            // Initial connection - create new peer connection
+            peerConnection = await createPeerConnection(peerId);
+          } else {
+            // Renegotiation - use existing peer connection
+          }
+
           await peerConnection.setRemoteDescription(
             new RTCSessionDescription({
               sdp: message.data.sdp,
@@ -357,10 +421,7 @@ export const Meeting = () => {
       }
 
       case 'ice-candidate': {
-        // Received ICE candidate
         const peerId = message.from!;
-        console.log('[WebRTC] Received ICE candidate from:', peerId, message.data);
-
         try {
           const peerConnection = peerConnectionsRef.current.get(peerId);
           if (peerConnection) {
@@ -371,21 +432,18 @@ export const Meeting = () => {
                 sdpMLineIndex: message.data.sdpMLineIndex,
               })
             );
-            console.log('[WebRTC] ICE candidate added successfully');
           } else {
-            console.error('[WebRTC] No peer connection found for ICE candidate from:', peerId);
+            console.error('[WebRTC] No peer connection for ICE candidate:', peerId);
           }
         } catch (error) {
-          console.error('[WebRTC] Error adding ICE candidate from:', peerId, error);
+          console.error('[WebRTC] ICE candidate error:', peerId, error);
         }
         break;
       }
 
       case 'peer-left': {
-        // Peer left, cleanup connection
         const peerData = message.data as { user_id: string; username: string };
         const peerId = peerData.user_id;
-        console.log('[WebRTC] Peer left:', peerData.username, '(', peerId, ')');
 
         const peerConnection = peerConnectionsRef.current.get(peerId);
         if (peerConnection) {
@@ -397,7 +455,6 @@ export const Meeting = () => {
       }
 
       case 'media-state-changed': {
-        // Peer changed media state (mute/unmute, video on/off)
         const peerId = message.from!;
         const mediaState = message.data as { is_muted: boolean; is_video_on: boolean };
 
@@ -412,30 +469,23 @@ export const Meeting = () => {
       }
 
       case 'join-request-pending': {
-        // User's join request is pending approval
-        console.log('[Join Approval] Join request is pending');
         setIsWaitingForApproval(true);
         break;
       }
 
       case 'pending-join-request': {
-        // Host received a join request
         const joinRequest = message.data as JoinRequestInfo;
-        console.log('[Join Approval] New join request from:', joinRequest.username);
         setPendingJoinRequests((prev) => [...prev, joinRequest]);
         break;
       }
 
       case 'join-approved': {
-        // User's join request was approved
-        console.log('[Join Approval] Join request approved');
         setIsWaitingForApproval(false);
         setIsJoinApproved(true);
 
-        // Now join the meeting and load participants
         if (meeting) {
           joinMeetingAndLoadData(meeting).catch((err) => {
-            console.error('[Join Approval] Failed to join meeting after approval:', err);
+            console.error('[Join] Failed to join after approval:', err);
             setError('Failed to join meeting after approval. Please try again.');
           });
         }
@@ -443,25 +493,19 @@ export const Meeting = () => {
       }
 
       case 'join-rejected': {
-        // User's join request was rejected
-        console.log('[Join Approval] Join request rejected');
         setIsWaitingForApproval(false);
         setError('Your join request was rejected by the host');
         break;
       }
 
       case 'screen-share-started': {
-        // Remote user started sharing screen
         const { user_id, username } = message.data as { user_id: string; username: string };
-        console.log('[ScreenShare] User started sharing:', username);
         setScreenSharingUser({ userId: user_id, username });
         break;
       }
 
       case 'screen-share-stopped': {
-        // Remote user stopped sharing screen
         const { user_id } = message.data as { user_id: string };
-        console.log('[ScreenShare] User stopped sharing:', user_id);
         setScreenSharingUser(null);
         setRemoteScreenStreams((prev) => {
           const newMap = new Map(prev);
@@ -501,7 +545,6 @@ export const Meeting = () => {
 
         // If not host, send join request
         if (!isHost && currentUserId) {
-          console.log('[Join Approval] Sending join request to host');
           const currentUser = await apiService.getMe();
           webSocketService.send({
             type: 'join-request',
@@ -511,13 +554,10 @@ export const Meeting = () => {
             },
           });
         } else if (isHost) {
-          // Host sends host-join message to get auto-approved
-          console.log('[Join Approval] Host sending host-join message');
           webSocketService.send({
             type: 'host-join',
             data: {},
           });
-          // Host is auto-approved
           setIsJoinApproved(true);
         }
       } catch (error) {
@@ -539,8 +579,6 @@ export const Meeting = () => {
   // WebSocket: Setup WebRTC handlers (only after join is approved)
   useEffect(() => {
     if (!meeting?.id || !isJoinApproved) return;
-
-    console.log('[WebRTC] Join approved, setting up WebRTC handlers');
 
     // Create wrapper handlers for WebRTC
     const readyHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
@@ -734,7 +772,7 @@ export const Meeting = () => {
       // Broadcast audio state change to other participants
       if (meeting?.id) {
         webSocketService.send({
-          type: 'media-state-changed',
+          type: 'media-state-changed' as const,
           data: {
             is_muted: !newAudioState,
             is_video_on: isVideoEnabled,
@@ -777,7 +815,7 @@ export const Meeting = () => {
       // Broadcast video state change
       if (meeting?.id) {
         webSocketService.send({
-          type: 'media-state-changed',
+          type: 'media-state-changed' as const,
           data: {
             is_muted: !isAudioEnabled,
             is_video_on: false,
@@ -821,7 +859,7 @@ export const Meeting = () => {
         // Broadcast video state change
         if (meeting?.id) {
           webSocketService.send({
-            type: 'media-state-changed',
+            type: 'media-state-changed' as const,
             data: {
               is_muted: !isAudioEnabled,
               is_video_on: true,
@@ -882,6 +920,91 @@ export const Meeting = () => {
     }
   };
 
+  // Handle ICE restart for network recovery
+  const handleICERestart = async (peerId: string) => {
+    const peerConnection = peerConnectionsRef.current.get(peerId);
+    if (!peerConnection) return;
+
+    try {
+      const offer = await peerConnection.createOffer({ iceRestart: true });
+      await peerConnection.setLocalDescription(offer);
+
+      webSocketService.send({
+        type: 'offer',
+        to: peerId,
+        data: {
+          sdp: offer.sdp,
+          type: offer.type,
+        },
+      });
+    } catch (error) {
+      console.error('[WebRTC] ICE restart failed:', peerId, error);
+    }
+  };
+
+  // Handle full peer reconnection
+  const handlePeerReconnection = async (peerId: string) => {
+    const peerConnection = peerConnectionsRef.current.get(peerId);
+    if (!peerConnection) return;
+
+    try {
+      await handleICERestart(peerId);
+
+      setTimeout(async () => {
+        if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected') {
+          console.warn('[WebRTC] Recreating connection:', peerId);
+
+          peerConnection.close();
+          peerConnectionsRef.current.delete(peerId);
+
+          const newPeerConnection = await createPeerConnection(peerId);
+          const offer = await newPeerConnection.createOffer();
+          await newPeerConnection.setLocalDescription(offer);
+
+          webSocketService.send({
+            type: 'offer',
+            to: peerId,
+            data: {
+              sdp: offer.sdp,
+              type: offer.type,
+            },
+          });
+        }
+      }, 10000);
+    } catch (error) {
+      console.error('[WebRTC] Reconnection failed:', peerId, error);
+    }
+  };
+
+  // Retry mechanism for renegotiation with exponential backoff
+  const renegotiateWithRetry = async (peerId: string, peerConnection: RTCPeerConnection, maxRetries = 3, retryDelay = 1000) => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        webSocketService.send({
+          type: 'offer',
+          to: peerId,
+          data: {
+            sdp: offer.sdp,
+            type: offer.type,
+          },
+        });
+
+        return true;
+      } catch (error) {
+        if (attempt === maxRetries) {
+          console.error('[WebRTC] Renegotiation failed after', maxRetries, 'attempts:', peerId, error);
+          return false;
+        }
+        const delay = retryDelay * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    return false;
+  };
+
   // Switch video device
   const switchVideoDevice = async (deviceId: string) => {
     if (!localStreamRef.current || !isVideoEnabled) return;
@@ -939,13 +1062,29 @@ export const Meeting = () => {
       // Stop screen sharing
       stopScreenShare();
 
-      // Remove screen track from all peer connections
-      screenTrackSendersRef.current.forEach((sender, peerId) => {
+      // Remove screen track from all peer connections and renegotiate
+      const stopPromises: Promise<void>[] = [];
+      for (const [peerId, sender] of screenTrackSendersRef.current.entries()) {
         const peerConnection = peerConnectionsRef.current.get(peerId);
         if (peerConnection) {
-          peerConnection.removeTrack(sender);
+          const stopPromise = (async () => {
+            try {
+              peerConnection.removeTrack(sender);
+
+              // Renegotiate connection with retry mechanism
+              const success = await renegotiateWithRetry(peerId, peerConnection);
+              if (!success) {
+                console.error('[ScreenShare] Failed to renegotiate stop with peer after retries:', peerId);
+              }
+            } catch (error) {
+              console.error('[ScreenShare] Failed to remove screen track or renegotiate with peer:', peerId, error);
+            }
+          })();
+          stopPromises.push(stopPromise);
         }
-      });
+      }
+
+      await Promise.all(stopPromises);
       screenTrackSendersRef.current.clear();
 
       // Notify other participants that screen sharing stopped
@@ -965,22 +1104,30 @@ export const Meeting = () => {
         return;
       }
 
-      // Wait a bit for screenStream to be available
-      setTimeout(() => {
+      // Wait a bit for screenStream to be available, then renegotiate
+      setTimeout(async () => {
         if (screenStream) {
           const screenTrack = screenStream.getVideoTracks()[0];
 
           if (screenTrack) {
-            // Add screen track to all existing peer connections
-            peerConnectionsRef.current.forEach((peerConnection, peerId) => {
+            // Add screen track to all existing peer connections and renegotiate
+            for (const [peerId, peerConnection] of peerConnectionsRef.current.entries()) {
               try {
                 const sender = peerConnection.addTrack(screenTrack, screenStream);
                 screenTrackSendersRef.current.set(peerId, sender);
-                console.log('[ScreenShare] Added screen track to peer:', peerId);
+
+                // Renegotiate connection with retry mechanism
+                const success = await renegotiateWithRetry(peerId, peerConnection);
+                if (!success) {
+                  console.error('[ScreenShare] Failed to renegotiate with peer after retries:', peerId);
+                  // Remove sender if renegotiation failed
+                  peerConnection.removeTrack(sender);
+                  screenTrackSendersRef.current.delete(peerId);
+                }
               } catch (error) {
                 console.error('[ScreenShare] Failed to add screen track to peer:', peerId, error);
               }
-            });
+            }
 
             // Notify other participants that screen sharing started
             if (meeting?.id && currentUserId) {
@@ -1006,17 +1153,10 @@ export const Meeting = () => {
     }
   }, [screenShareError]);
 
-  // Log screen sharing user changes (will be used for UI in Phase 3)
+  // Sync participants to ref for use in callbacks
   useEffect(() => {
-    if (screenSharingUser) {
-      console.log('[ScreenShare] User is sharing:', screenSharingUser.username);
-    }
-  }, [screenSharingUser]);
-
-  // Log remote screen streams (will be used for UI in Phase 3)
-  useEffect(() => {
-    console.log('[ScreenShare] Remote screen streams count:', remoteScreenStreams.size);
-  }, [remoteScreenStreams]);
+    participantsRef.current = participants;
+  }, [participants]);
 
   // Stop all media tracks
   const stopMediaTracks = () => {
@@ -1147,7 +1287,6 @@ export const Meeting = () => {
 
   // Join approval handlers
   const handleApproveJoinRequest = (userId: string) => {
-    console.log('[Join Approval] Approving join request for:', userId);
     webSocketService.send({
       type: 'approve-join-request',
       data: {
@@ -1159,7 +1298,6 @@ export const Meeting = () => {
   };
 
   const handleRejectJoinRequest = (userId: string) => {
-    console.log('[Join Approval] Rejecting join request for:', userId);
     webSocketService.send({
       type: 'reject-join-request',
       data: {
@@ -1335,9 +1473,9 @@ export const Meeting = () => {
             </div>
           )}
 
-          {/* Grid layout changes based on screen share state */}
-          {(isScreenSharing || screenSharingUser) && !isScreenShareMinimized ? (
-            // Screen share mode: Fixed size tiles with scrolling
+          {/* Grid layout changes based on LOCAL screen share state */}
+          {isScreenSharing && !isScreenShareMinimized ? (
+            // Local screen share mode: Fixed size tiles with scrolling
             <div className="flex-1 overflow-y-auto overflow-x-hidden">
               <div className="grid gap-3 justify-center" style={{ gridTemplateColumns: 'repeat(auto-fill, 250px)' }}>
                 {/* Local video (You) - Fixed 250x250 in screen share mode */}
@@ -1464,7 +1602,8 @@ export const Meeting = () => {
                     <video
                       ref={(el) => {
                         if (el) {
-                          el.srcObject = Array.from(remoteScreenStreams.values())[0];
+                          const stream = Array.from(remoteScreenStreams.values())[0];
+                          el.srcObject = stream;
                         }
                       }}
                       autoPlay
@@ -1606,7 +1745,8 @@ export const Meeting = () => {
                   <video
                     ref={(el) => {
                       if (el) {
-                        el.srcObject = Array.from(remoteScreenStreams.values())[0];
+                        const stream = Array.from(remoteScreenStreams.values())[0];
+                        el.srcObject = stream;
                       }
                     }}
                     autoPlay

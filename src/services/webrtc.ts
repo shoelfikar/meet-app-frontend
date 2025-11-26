@@ -89,8 +89,6 @@ export class WebRTCService {
 
     // Handle connection state change
     peerConnection.onconnectionstatechange = () => {
-      console.log(`Peer ${peerId} connection state:`, peerConnection.connectionState);
-
       if (peerConnection.connectionState === 'disconnected') {
         this.closePeerConnection(peerId);
       }
@@ -98,7 +96,7 @@ export class WebRTCService {
 
     // Handle ICE connection state change
     peerConnection.oniceconnectionstatechange = () => {
-      console.log(`Peer ${peerId} ICE connection state:`, peerConnection.iceConnectionState);
+      // ICE connection state monitoring
     };
 
     this.peerConnections.set(peerId, peerConnection);
