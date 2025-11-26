@@ -1476,7 +1476,7 @@ export const Meeting = () => {
           {/* Grid layout changes based on LOCAL screen share state */}
           {isScreenSharing && !isScreenShareMinimized ? (
             // Local screen share mode: Fixed size tiles with scrolling
-            <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
               <div className="grid gap-3 justify-center" style={{ gridTemplateColumns: 'repeat(auto-fill, 250px)' }}>
                 {/* Local video (You) - Fixed 250x250 in screen share mode */}
                 <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center" style={{ width: '250px', height: '250px' }}>
@@ -1486,7 +1486,7 @@ export const Meeting = () => {
                     autoPlay
                     playsInline
                     muted
-                    className={`w-full h-full object-cover ${isVideoEnabled ? 'block' : 'hidden'}`}
+                    className={`w-full h-full object-contain ${isVideoEnabled ? 'block' : 'hidden'}`}
                     style={{ transform: 'scaleX(-1)' }}
                   />
 
@@ -1558,7 +1558,7 @@ export const Meeting = () => {
                     }}
                     autoPlay
                     playsInline
-                    className={`w-full h-full object-cover ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
+                    className={`w-full h-full object-contain ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
                     style={{ transform: 'scaleX(-1)' }}
                   />
 
@@ -1624,7 +1624,7 @@ export const Meeting = () => {
             </div>
           ) : (
             // Normal mode: Responsive grid
-            <div className={`grid gap-2 sm:gap-3 md:gap-4 flex-1 ${getGridClass(totalParticipants)} auto-rows-fr`}>
+            <div className={`grid gap-2 sm:gap-3 md:gap-4 flex-1 pb-20 ${getGridClass(totalParticipants)} auto-rows-fr`}>
               {/* Local video (You) */}
               <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center">
                 {/* Video element - always mounted to prevent re-initialization */}
@@ -1633,7 +1633,7 @@ export const Meeting = () => {
                   autoPlay
                   playsInline
                   muted
-                  className={`w-full h-full object-cover ${isVideoEnabled ? 'block' : 'hidden'}`}
+                  className={`w-full h-full object-contain ${isVideoEnabled ? 'block' : 'hidden'}`}
                   style={{ transform: 'scaleX(-1)' }}
                 />
 
@@ -1704,7 +1704,7 @@ export const Meeting = () => {
                       }}
                       autoPlay
                       playsInline
-                      className={`w-full h-full object-cover ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
+                      className={`w-full h-full object-contain ${participant.stream && participant.is_video_on ? 'block' : 'hidden'}`}
                       style={{ transform: 'scaleX(-1)' }}
                     />
 
