@@ -44,7 +44,7 @@ export const Login = () => {
           <div className="flex items-center justify-center mb-4">
             <VideoCameraIcon className="w-12 h-12 text-blue-500" />
           </div>
-          <h1 className="text-3xl font-bold text-white mb-2">Meet App</h1>
+          <h1 className="text-3xl font-bold text-white mb-2">Meet Up Now</h1>
           <p className="text-gray-400">Sign in to your account</p>
         </div>
 

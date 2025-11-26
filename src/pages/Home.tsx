@@ -70,7 +70,7 @@ export const Home = () => {
             <div className="flex items-center justify-center mb-6">
               <VideoCameraIcon className="w-16 h-16 text-blue-500" />
             </div>
-            <h1 className="text-5xl font-bold text-white mb-4">Meet App</h1>
+            <h1 className="text-5xl font-bold text-white mb-4">Meet Up Now</h1>
             <p className="text-xl text-gray-400">
               Secure video meetings for everyone
             </p>
