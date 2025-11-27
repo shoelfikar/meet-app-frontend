@@ -41,6 +41,7 @@ export const Meeting = () => {
   const screenTrackSendersRef = useRef<Map<string, RTCRtpSender>>(new Map()); // Track screen senders per peer
   const participantsRef = useRef<MeetingParticipant[]>([]); // Keep participants in ref for access in callbacks
   const isJoiningRef = useRef<boolean>(false); // Prevent duplicate join attempts
+  const remoteScreenShareVideoRef = useRef<HTMLVideoElement | null>(null); // Ref for remote screen share video
 
   // Meeting state
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
@@ -241,35 +242,87 @@ export const Meeting = () => {
 
     // Handle remote stream
     peerConnection.ontrack = (event) => {
+      console.log('[WebRTC] ontrack event:', {
+        peerId,
+        trackKind: event.track.kind,
+        trackId: event.track.id,
+        streamCount: event.streams?.length,
+        streamIds: event.streams?.map(s => s.id)
+      });
+
       if (event.streams && event.streams.length > 0) {
         const stream = event.streams[0];
-        const hasAudio = stream.getAudioTracks().length > 0;
-        const hasVideo = stream.getVideoTracks().length > 0;
-        const isScreenShare = hasVideo && !hasAudio;
 
-        if (isScreenShare) {
+        // Get all tracks info for debugging
+        const audioTracks = stream.getAudioTracks();
+        const videoTracks = stream.getVideoTracks();
+
+        console.log('[WebRTC] Track analysis:', {
+          peerId,
+          eventTrack: {
+            kind: event.track.kind,
+            label: event.track.label,
+            id: event.track.id
+          },
+          streamTracks: {
+            audioCount: audioTracks.length,
+            videoCount: videoTracks.length,
+            audioLabels: audioTracks.map(t => t.label),
+            videoLabels: videoTracks.map(t => t.label)
+          }
+        });
+
+        // Screen share detection:
+        // Primary: Check track label (most reliable)
+        const hasScreenLabel = event.track.kind === 'video' &&
+          (event.track.label.toLowerCase().includes('screen') ||
+           event.track.label.toLowerCase().includes('display') ||
+           event.track.label.toLowerCase().includes('window'));
+
+        // Fallback: Video-only stream (no audio tracks) - works for getDisplayMedia streams
+        const isVideoOnlyStream = event.track.kind === 'video' &&
+          videoTracks.length === 1 && audioTracks.length === 0;
+
+        // Accept EITHER label match OR video-only (more permissive for compatibility)
+        const isScreenShareTrack = hasScreenLabel || isVideoOnlyStream;
+
+        console.log('[WebRTC] Screen share detection:', {
+          peerId,
+          trackKind: event.track.kind,
+          trackLabel: event.track.label,
+          hasScreenLabel,
+          isVideoOnlyStream,
+          videoCount: videoTracks.length,
+          audioCount: audioTracks.length,
+          finalDecision: isScreenShareTrack
+        });
+
+        if (isScreenShareTrack) {
+          console.log('[ScreenShare] Screen share track detected, creating pure screen stream');
+
+          // Create a NEW stream with ONLY the screen share track (no audio)
+          const screenOnlyStream = new MediaStream([event.track]);
+
           setRemoteScreenStreams((prev) => {
             const newMap = new Map(prev);
-            newMap.set(peerId, stream);
+            newMap.set(peerId, screenOnlyStream);
             return newMap;
           });
 
           // Monitor screen share track for ended event
-          const videoTrack = stream.getVideoTracks()[0];
-          if (videoTrack) {
-            videoTrack.onended = () => {
-              console.warn('[WebRTC] Screen share track ended for:', peerId);
-              setRemoteScreenStreams((prev) => {
-                const newMap = new Map(prev);
-                newMap.delete(peerId);
-                return newMap;
-              });
-            };
+          event.track.onended = () => {
+            console.warn('[ScreenShare] Screen share track ended for:', peerId);
+            setRemoteScreenStreams((prev) => {
+              const newMap = new Map(prev);
+              newMap.delete(peerId);
+              return newMap;
+            });
+            setScreenSharingUser(null);
+          };
 
-            videoTrack.onmute = () => {
-              console.warn('[WebRTC] Track muted -', peerId);
-            };
-          }
+          event.track.onmute = () => {
+            console.warn('[ScreenShare] Screen share track muted:', peerId);
+          };
 
           // Fallback: Set screenSharingUser from ontrack event
           // This will be overridden by WebSocket message if it arrives later
@@ -295,9 +348,15 @@ export const Meeting = () => {
           });
         } else {
           // Regular camera/audio stream
+          console.log('[Video] Received camera/audio stream for peer:', peerId);
+
+          // Try to assign to existing video element (if already rendered)
           const remoteVideo = remoteVideoRefs.current.get(peerId);
           if (remoteVideo) {
+            console.log('[Video] Assigning stream to existing video element:', peerId);
             remoteVideo.srcObject = stream;
+          } else {
+            console.log('[Video] Video element not ready yet, will assign via ref callback:', peerId);
           }
 
           // Monitor tracks for network issues
@@ -310,6 +369,7 @@ export const Meeting = () => {
             };
           });
 
+          // Store stream in participant state (will be assigned via ref callback if element not ready)
           setParticipants((prev) =>
             prev.map((p) =>
               p.user.id === peerId ? { ...p, stream: stream } : p
@@ -1239,6 +1299,29 @@ export const Meeting = () => {
     participantsRef.current = participants;
   }, [participants]);
 
+  // Assign remote screen share stream when it changes OR when screenSharingUser changes
+  useEffect(() => {
+    console.log('[ScreenShare] useEffect triggered:', {
+      hasVideoRef: !!remoteScreenShareVideoRef.current,
+      streamSize: remoteScreenStreams.size,
+      screenSharingUser: screenSharingUser?.username
+    });
+
+    if (remoteScreenShareVideoRef.current && remoteScreenStreams.size > 0) {
+      const stream = Array.from(remoteScreenStreams.values())[0];
+      if (remoteScreenShareVideoRef.current.srcObject !== stream) {
+        console.log('[ScreenShare] Assigning remote screen share stream via useEffect');
+        remoteScreenShareVideoRef.current.srcObject = stream;
+      } else {
+        console.log('[ScreenShare] Stream already assigned, skipping');
+      }
+    } else {
+      console.log('[ScreenShare] Cannot assign stream:', {
+        reason: !remoteScreenShareVideoRef.current ? 'Video ref not ready' : 'No stream available'
+      });
+    }
+  }, [remoteScreenStreams, screenSharingUser]); // ✅ Watch both!
+
   // Stop all media tracks
   const stopMediaTracks = () => {
     // Stop animation frame
@@ -1635,6 +1718,11 @@ export const Meeting = () => {
                     ref={(el) => {
                       if (el) {
                         remoteVideoRefs.current.set(participant.user.id, el);
+                        // Assign stream from participant state (ensures stream is set even if ontrack happens before render)
+                        if (participant.stream && el.srcObject !== participant.stream) {
+                          console.log('[Video] Assigning stream from participant state:', participant.user.id);
+                          el.srcObject = participant.stream;
+                        }
                       }
                     }}
                     autoPlay
@@ -1675,16 +1763,21 @@ export const Meeting = () => {
                 })}
 
                 {/* Remote screen share - shown as grid item */}
-                {screenSharingUser && !isScreenSharing && remoteScreenStreams.size > 0 && (
+                {screenSharingUser && !isScreenSharing && (
                   <div
                     className="relative bg-gray-900 rounded-xl overflow-hidden flex items-center justify-center"
                     style={{ width: '250px', height: '250px' }}
                   >
                     <video
                       ref={(el) => {
-                        if (el) {
+                        remoteScreenShareVideoRef.current = el;
+                        // Try to assign stream immediately if available
+                        if (el && remoteScreenStreams.size > 0) {
                           const stream = Array.from(remoteScreenStreams.values())[0];
-                          el.srcObject = stream;
+                          if (el.srcObject !== stream) {
+                            console.log('[ScreenShare] Assigning stream via ref callback (screen share mode)');
+                            el.srcObject = stream;
+                          }
                         }
                       }}
                       autoPlay
@@ -1782,6 +1875,11 @@ export const Meeting = () => {
                       ref={(el) => {
                         if (el) {
                           remoteVideoRefs.current.set(participant.user.id, el);
+                          // Assign stream from participant state (ensures stream is set even if ontrack happens before render)
+                          if (participant.stream && el.srcObject !== participant.stream) {
+                            console.log('[Video] Assigning stream from participant state:', participant.user.id);
+                            el.srcObject = participant.stream;
+                          }
                         }
                       }}
                       autoPlay
@@ -1822,13 +1920,18 @@ export const Meeting = () => {
               })}
 
               {/* Remote screen share - shown as grid item in normal mode */}
-              {screenSharingUser && !isScreenSharing && remoteScreenStreams.size > 0 && (
+              {screenSharingUser && !isScreenSharing && (
                 <div className="relative bg-gray-900 rounded-xl overflow-hidden flex items-center justify-center">
                   <video
                     ref={(el) => {
-                      if (el) {
+                      remoteScreenShareVideoRef.current = el;
+                      // Try to assign stream immediately if available
+                      if (el && remoteScreenStreams.size > 0) {
                         const stream = Array.from(remoteScreenStreams.values())[0];
-                        el.srcObject = stream;
+                        if (el.srcObject !== stream) {
+                          console.log('[ScreenShare] Assigning stream via ref callback (normal mode)');
+                          el.srcObject = stream;
+                        }
                       }
                     }}
                     autoPlay
