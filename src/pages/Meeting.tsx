@@ -40,6 +40,7 @@ export const Meeting = () => {
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const screenTrackSendersRef = useRef<Map<string, RTCRtpSender>>(new Map()); // Track screen senders per peer
   const participantsRef = useRef<MeetingParticipant[]>([]); // Keep participants in ref for access in callbacks
+  const isJoiningRef = useRef<boolean>(false); // Prevent duplicate join attempts
 
   // Meeting state
   const [meeting, setMeeting] = useState<MeetingType | null>(null);
@@ -142,17 +143,31 @@ export const Meeting = () => {
 
   // Join meeting and load participants (called after approval)
   const joinMeetingAndLoadData = useCallback(async (meetingData: MeetingType) => {
+    // Prevent duplicate join attempts
+    if (isJoiningRef.current) {
+      console.log('[Join] Already joining meeting, skipping duplicate call');
+      return;
+    }
+
+    console.log('[Join] Attempting to join meeting:', meetingData.code);
+    isJoiningRef.current = true;
+
     try {
       // Try to join the meeting
       try {
         await apiService.joinMeeting(meetingData.code);
+        console.log('[Join] Successfully joined meeting');
       } catch (joinError) {
-        // Ignore "already in meeting" error - this is OK for hosts
+        // Ignore "already in meeting" error - this is OK for hosts and re-joins
         const axiosError = joinError as AxiosError<{ error?: string }>;
         const errorMessage = axiosError.response?.data?.error || '';
 
-        if (!errorMessage.toLowerCase().includes('already') &&
-            axiosError.response?.status !== 409) {
+        if (errorMessage.toLowerCase().includes('already') || axiosError.response?.status === 409) {
+          console.log('[Join] User already in meeting (expected on refresh/re-join) - continuing...');
+          // Continue silently - this is normal behavior
+        } else {
+          // Only throw if it's a different error
+          console.error('[Join] Join meeting failed with unexpected error:', errorMessage);
           throw joinError;
         }
       }
@@ -175,6 +190,9 @@ export const Meeting = () => {
     } catch (err) {
       console.error('Failed to join meeting:', err);
       setError('Failed to join meeting. Please try again.');
+    } finally {
+      // Reset joining flag
+      isJoiningRef.current = false;
     }
   }, []);
 
@@ -253,13 +271,27 @@ export const Meeting = () => {
             };
           }
 
-          // Fallback: Set screenSharingUser if not already set
+          // Fallback: Set screenSharingUser from ontrack event
+          // This will be overridden by WebSocket message if it arrives later
           setScreenSharingUser((prevState) => {
-            if (!prevState) {
-              const participant = participantsRef.current.find(p => p.user.id === peerId);
-              return { userId: peerId, username: participant?.user.name || 'Unknown User' };
-            }
-            return prevState;
+            // Try to find participant with flexible ID matching
+            const participant = participantsRef.current.find(p =>
+              String(p.user.id) === String(peerId)
+            );
+
+            const username = participant?.user.name || 'Connecting...';
+
+            console.log('[ScreenShare] Fallback: Setting screen sharing user from ontrack:', {
+              peerId,
+              username,
+              participantFound: !!participant,
+              totalParticipants: participantsRef.current.length,
+              participantIds: participantsRef.current.map(p => String(p.user.id)),
+              prevState
+            });
+
+            // Always update to ensure we have a user (even if temporary)
+            return { userId: peerId, username };
           });
         } else {
           // Regular camera/audio stream
@@ -480,6 +512,7 @@ export const Meeting = () => {
       }
 
       case 'join-approved': {
+        console.log('[Approval] Join approved - setting isJoinApproved to true');
         setIsWaitingForApproval(false);
         setIsJoinApproved(true);
 
@@ -500,6 +533,8 @@ export const Meeting = () => {
 
       case 'screen-share-started': {
         const { user_id, username } = message.data as { user_id: string; username: string };
+        console.log('[ScreenShare] Received screen-share-started message:', { user_id, username });
+        // Always override with correct username from WebSocket
         setScreenSharingUser({ userId: user_id, username });
         break;
       }
@@ -529,6 +564,9 @@ export const Meeting = () => {
     const pendingJoinRequestHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const joinApprovedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const joinRejectedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    // Setup screen share handlers early to not miss messages
+    const screenShareStartedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
+    const screenShareStoppedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
 
     const connectWebSocket = async () => {
       try {
@@ -539,6 +577,9 @@ export const Meeting = () => {
         webSocketService.on('pending-join-request', pendingJoinRequestHandler);
         webSocketService.on('join-approved', joinApprovedHandler);
         webSocketService.on('join-rejected', joinRejectedHandler);
+        // Setup screen share handlers early (before approval to catch initial state)
+        webSocketService.on('screen-share-started', screenShareStartedHandler);
+        webSocketService.on('screen-share-stopped', screenShareStoppedHandler);
 
         // Check if current user is host
         const isHost = currentUserId === String(meeting.host_id);
@@ -554,6 +595,7 @@ export const Meeting = () => {
             },
           });
         } else if (isHost) {
+          console.log('[Approval] Host joining - setting isJoinApproved to true');
           webSocketService.send({
             type: 'host-join',
             data: {},
@@ -573,6 +615,9 @@ export const Meeting = () => {
       webSocketService.off('pending-join-request', pendingJoinRequestHandler);
       webSocketService.off('join-approved', joinApprovedHandler);
       webSocketService.off('join-rejected', joinRejectedHandler);
+      // Cleanup screen share listeners
+      webSocketService.off('screen-share-started', screenShareStartedHandler);
+      webSocketService.off('screen-share-stopped', screenShareStoppedHandler);
     };
   }, [meeting?.id, isMediaReady, currentUserId, handleWebSocketMessage]);
 
@@ -588,8 +633,6 @@ export const Meeting = () => {
     const iceCandidateHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const peerLeftHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
     const mediaStateChangedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const screenShareStartedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
-    const screenShareStoppedHandler = (msg: WebSocketMessage) => handleWebSocketMessage(msg);
 
     // Setup WebRTC message handlers
     webSocketService.on('ready', readyHandler);
@@ -599,8 +642,7 @@ export const Meeting = () => {
     webSocketService.on('ice-candidate', iceCandidateHandler);
     webSocketService.on('peer-left', peerLeftHandler);
     webSocketService.on('media-state-changed', mediaStateChangedHandler);
-    webSocketService.on('screen-share-started', screenShareStartedHandler);
-    webSocketService.on('screen-share-stopped', screenShareStoppedHandler);
+    // Note: screen-share handlers are setup earlier in approval phase
 
     return () => {
       // Cleanup WebRTC listeners
@@ -611,8 +653,6 @@ export const Meeting = () => {
       webSocketService.off('ice-candidate', iceCandidateHandler);
       webSocketService.off('peer-left', peerLeftHandler);
       webSocketService.off('media-state-changed', mediaStateChangedHandler);
-      webSocketService.off('screen-share-started', screenShareStartedHandler);
-      webSocketService.off('screen-share-stopped', screenShareStoppedHandler);
 
       // Close all peer connections
       peerConnectionsRef.current.forEach((pc) => pc.close());
@@ -769,8 +809,9 @@ export const Meeting = () => {
       });
       setIsAudioEnabled(newAudioState);
 
-      // Broadcast audio state change to other participants
-      if (meeting?.id) {
+      // Broadcast audio state change to other participants (only if approved)
+      if (meeting?.id && isJoinApproved) {
+        console.log('[Media] Broadcasting audio state change:', { is_muted: !newAudioState, is_video_on: isVideoEnabled });
         webSocketService.send({
           type: 'media-state-changed' as const,
           data: {
@@ -778,6 +819,8 @@ export const Meeting = () => {
             is_video_on: isVideoEnabled,
           },
         });
+      } else {
+        console.warn('[Media] Cannot broadcast audio state - meeting.id:', !!meeting?.id, 'isJoinApproved:', isJoinApproved);
       }
     }
   };
@@ -794,12 +837,22 @@ export const Meeting = () => {
         localStreamRef.current?.removeTrack(track);
       });
 
-      // Replace video track with null in all peer connections
-      peerConnectionsRef.current.forEach((peerConnection) => {
+      // Replace camera video track with null in all peer connections (preserve screen share)
+      peerConnectionsRef.current.forEach((peerConnection, peerId) => {
         const senders = peerConnection.getSenders();
-        const videoSender = senders.find(sender => sender.track?.kind === 'video');
-        if (videoSender) {
-          videoSender.replaceTrack(null);
+
+        // Get screen share sender for this peer (if exists)
+        const screenShareSender = screenTrackSendersRef.current.get(peerId);
+
+        // Find camera video sender (exclude screen share sender)
+        const cameraVideoSender = senders.find(sender =>
+          sender !== screenShareSender && // CRITICAL: Don't touch screen share!
+          sender.track?.kind === 'video'
+        );
+
+        if (cameraVideoSender) {
+          console.log('[Video] Removing camera track for peer:', peerId);
+          cameraVideoSender.replaceTrack(null);
         }
       });
 
@@ -812,8 +865,9 @@ export const Meeting = () => {
 
       setIsVideoEnabled(false);
 
-      // Broadcast video state change
-      if (meeting?.id) {
+      // Broadcast video state change (only if approved)
+      if (meeting?.id && isJoinApproved) {
+        console.log('[Media] Broadcasting video OFF state change:', { is_muted: !isAudioEnabled, is_video_on: false });
         webSocketService.send({
           type: 'media-state-changed' as const,
           data: {
@@ -821,6 +875,8 @@ export const Meeting = () => {
             is_video_on: false,
           },
         });
+      } else {
+        console.warn('[Media] Cannot broadcast video OFF - meeting.id:', !!meeting?.id, 'isJoinApproved:', isJoinApproved);
       }
     } else {
       // Turn on video - get new video stream
@@ -836,14 +892,25 @@ export const Meeting = () => {
         const newVideoTrack = videoStream.getVideoTracks()[0];
         localStreamRef.current.addTrack(newVideoTrack);
 
-        // Replace video track in all peer connections
-        peerConnectionsRef.current.forEach((peerConnection) => {
+        // Replace video track in all peer connections (excluding screen share tracks)
+        peerConnectionsRef.current.forEach((peerConnection, peerId) => {
           const senders = peerConnection.getSenders();
-          const videoSender = senders.find(sender => sender.track?.kind === 'video' || (sender.track === null && senders.length > 1));
-          if (videoSender) {
-            videoSender.replaceTrack(newVideoTrack);
+
+          // Get screen share sender for this peer (if exists)
+          const screenShareSender = screenTrackSendersRef.current.get(peerId);
+
+          // Find camera video sender (exclude screen share sender)
+          const cameraVideoSender = senders.find(sender =>
+            sender !== screenShareSender && // CRITICAL: Don't touch screen share!
+            (sender.track?.kind === 'video' || (sender.track === null && senders.length > 1))
+          );
+
+          if (cameraVideoSender) {
+            console.log('[Video] Replacing camera track for peer:', peerId);
+            cameraVideoSender.replaceTrack(newVideoTrack);
           } else {
-            // If no video sender exists, add the new track
+            // If no camera video sender exists, add the new track
+            console.log('[Video] Adding new camera track for peer:', peerId);
             peerConnection.addTrack(newVideoTrack, localStreamRef.current!);
           }
         });
@@ -856,8 +923,9 @@ export const Meeting = () => {
 
         setIsVideoEnabled(true);
 
-        // Broadcast video state change
-        if (meeting?.id) {
+        // Broadcast video state change (only if approved)
+        if (meeting?.id && isJoinApproved) {
+          console.log('[Media] Broadcasting video ON state change:', { is_muted: !isAudioEnabled, is_video_on: true });
           webSocketService.send({
             type: 'media-state-changed' as const,
             data: {
@@ -865,6 +933,8 @@ export const Meeting = () => {
               is_video_on: true,
             },
           });
+        } else {
+          console.warn('[Media] Cannot broadcast video ON - meeting.id:', !!meeting?.id, 'isJoinApproved:', isJoinApproved);
         }
       } catch (err) {
         console.error('Failed to enable video:', err);
@@ -1031,13 +1101,24 @@ export const Meeting = () => {
       // Add new video track to local stream
       localStreamRef.current.addTrack(newVideoTrack);
 
-      // Replace video track in all peer connections
-      peerConnectionsRef.current.forEach((peerConnection) => {
+      // Replace camera video track in all peer connections (preserve screen share)
+      peerConnectionsRef.current.forEach((peerConnection, peerId) => {
         const senders = peerConnection.getSenders();
-        const videoSender = senders.find((sender) => sender.track?.kind === 'video');
-        if (videoSender) {
-          videoSender.replaceTrack(newVideoTrack);
+
+        // Get screen share sender for this peer (if exists)
+        const screenShareSender = screenTrackSendersRef.current.get(peerId);
+
+        // Find camera video sender (exclude screen share sender)
+        const cameraVideoSender = senders.find((sender) =>
+          sender !== screenShareSender && // CRITICAL: Don't touch screen share!
+          sender.track?.kind === 'video'
+        );
+
+        if (cameraVideoSender) {
+          console.log('[Video] Switching camera device for peer:', peerId);
+          cameraVideoSender.replaceTrack(newVideoTrack);
         } else {
+          console.log('[Video] Adding camera track for peer:', peerId);
           peerConnection.addTrack(newVideoTrack, localStreamRef.current!);
         }
       });
@@ -1623,8 +1704,9 @@ export const Meeting = () => {
               </div>
             </div>
           ) : (
-            // Normal mode: Responsive grid
-            <div className={`grid gap-2 sm:gap-3 md:gap-4 flex-1 pb-20 ${getGridClass(totalParticipants)} auto-rows-fr`}>
+            // Normal mode: Responsive grid with scrolling
+            <div className={`flex-1 ${totalParticipants === 1 ? 'h-full' : 'overflow-y-auto overflow-x-hidden pb-20'}`}>
+              <div className={`grid gap-2 sm:gap-3 md:gap-4 ${getGridClass(totalParticipants)} ${totalParticipants === 1 ? 'h-full' : 'auto-rows-fr min-h-full'}`}>
               {/* Local video (You) */}
               <div className="relative bg-gray-800 rounded-xl overflow-hidden flex items-center justify-center">
                 {/* Video element - always mounted to prevent re-initialization */}
@@ -1633,7 +1715,7 @@ export const Meeting = () => {
                   autoPlay
                   playsInline
                   muted
-                  className={`w-full h-full object-contain ${isVideoEnabled ? 'block' : 'hidden'}`}
+                  className={`w-full object-contain ${isVideoEnabled ? 'block' : 'hidden'}`}
                   style={{ transform: 'scaleX(-1)' }}
                 />
 
@@ -1763,6 +1845,7 @@ export const Meeting = () => {
                   </div>
                 </div>
               )}
+              </div>
             </div>
           )}
         </div>
